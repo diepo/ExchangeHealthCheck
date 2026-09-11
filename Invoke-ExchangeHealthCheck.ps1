@@ -1559,9 +1559,41 @@ function Invoke-HcCertificateCheck {
         }
     }
 
-    if (@($relevant | Where-Object { ([datetime]$_.NotAfter - (Get-Date)).TotalDays -le [double]$t.CertExpiryDaysWarning }).Count -eq 0) {
+    # Non basta guardare le date: un certificato puo essere revocato, con catena
+    # non attendibile o non ancora valido pur avendo una scadenza lontana.
+    foreach ($cert in $relevant) {
+        $status = [string]$cert.Status
+        if ($status -and $status -ne 'Valid') {
+            Add-Finding -Category 'Certificate' -Server $Target.Name -Item ('{0}-Status' -f $cert.Thumbprint) -Severity 'Warning' `
+                -Message ('Certificato "{0}" (servizi: {1}) in stato {2}, pur essendo assegnato a servizi attivi.' -f $cert.Subject, $cert.Services, $status) `
+                -Value $status
+        }
+    }
+
+    # Due certificati con stesso Subject E stesso Issuer rendono ambiguo il
+    # TlsCertificateName dei connector, che li identifica con "<I>Issuer<S>Subject"
+    # e non per thumbprint: Exchange puo agganciare quello sbagliato, ed e una
+    # causa tipica del monitor Transport.ServerCertMismatch.
+    $duplicates = @($relevant |
+        Group-Object { '{0}|{1}' -f $_.Subject, $_.Issuer } |
+        Where-Object { $_.Count -gt 1 })
+
+    foreach ($group in $duplicates) {
+        $details = ($group.Group | ForEach-Object {
+            '{0} (scade {1:yyyy-MM-dd}, stato {2})' -f $_.Thumbprint, [datetime]$_.NotAfter, $_.Status
+        }) -join '; '
+        $subject = [string]$group.Group[0].Subject
+        Add-Finding -Category 'Certificate' -Server $Target.Name -Item ('Duplicato-{0}' -f $subject) -Severity 'Warning' `
+            -Message ('{0} certificati con stesso Subject e Issuer ("{1}") assegnati a servizi: il TlsCertificateName dei connector diventa ambiguo. Thumbprint: {2}' -f $group.Count, $subject, $details) `
+            -Value $group.Count
+    }
+
+    $expiring = @($relevant | Where-Object { ([datetime]$_.NotAfter - (Get-Date)).TotalDays -le [double]$t.CertExpiryDaysWarning })
+    $invalid  = @($relevant | Where-Object { [string]$_.Status -and [string]$_.Status -ne 'Valid' })
+
+    if ($expiring.Count -eq 0 -and $invalid.Count -eq 0 -and $duplicates.Count -eq 0) {
         Add-Finding -Category 'Certificate' -Server $Target.Name -Item 'AllCertificates' -Severity 'OK' `
-            -Message ('Nessun certificato in scadenza entro {0} giorni ({1} verificati).' -f $t.CertExpiryDaysWarning, $relevant.Count)
+            -Message ('Nessun certificato in scadenza entro {0} giorni, non valido o duplicato ({1} verificati).' -f $t.CertExpiryDaysWarning, $relevant.Count)
     }
 }
 
