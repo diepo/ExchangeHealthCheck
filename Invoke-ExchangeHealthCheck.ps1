@@ -1311,19 +1311,35 @@ function Invoke-HcBackPressureCheck {
     $meters = @($xml.SelectNodes('//ResourceMeter'))
     if ($meters.Count -eq 0) { return }
 
+    # Attenzione ai campi: "CurrentResourceUse" e lo STATO (Low / Medium / High),
+    # "Pressure" e la misura numerica della risorsa. Low e lo stato SANO: e il
+    # valore normale su un server che sta benissimo. Confrontare Pressure con
+    # 'Normal' faceva scattare l'allarme su ogni risorsa a ogni esecuzione.
     $pressured = @()
     foreach ($meter in $meters) {
-        $pressure = [string]$meter.Pressure
         $resource = [string]$meter.Resource
-        if ($pressure -and $pressure -ne 'Normal') {
-            $pressured += ('{0} = {1} (uso {2})' -f $resource, $pressure, $meter.CurrentResourceUse)
+
+        $level = [string]$meter.CurrentResourceUse
+        if ($level -notmatch '^\s*(Low|Medium|High)\s*$') {
+            $alternative = [string]$meter.Pressure
+            if ($alternative -match '^\s*(Low|Medium|High)\s*$') { $level = $alternative }
+        }
+        $level = $level.Trim()
+
+        if ($level -match '^(Medium|High)$') {
+            $detail = '{0} = {1}' -f $resource, $level
+            $measure = [string]$meter.Pressure
+            if ($measure -and $measure.Trim() -ne $level) { $detail += ' (valore {0})' -f $measure.Trim() }
+            $pressured += [pscustomobject]@{ Text = $detail; Level = $level }
         }
     }
 
     if ($pressured.Count -gt 0) {
-        $sev = if (($pressured -join ' ') -match 'High') { 'Critical' } else { 'Warning' }
+        $sev = 'Warning'
+        if (@($pressured | Where-Object { $_.Level -eq 'High' }).Count -gt 0) { $sev = 'Critical' }
+        $text = ($pressured | ForEach-Object { $_.Text }) -join '; '
         Add-Finding -Category 'BackPressure' -Server $Target.Name -Item 'Transport' -Severity $sev `
-            -Message ('Back pressure attiva sul transport: {0}' -f ($pressured -join '; ')) -Value ($pressured -join '; ')
+            -Message ('Back pressure sul transport: {0}' -f $text) -Value $text
     }
     else {
         Add-Finding -Category 'BackPressure' -Server $Target.Name -Item 'Transport' -Severity 'OK' `
