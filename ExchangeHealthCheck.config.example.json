@@ -1,0 +1,156 @@
+{
+  "Organization": {
+    "Name": "CONTOSO",
+    "ConnectTo": "ex-mbx-01.contoso.local",
+    "ViewEntireForest": true
+  },
+
+  "Servers": {
+    "Include": ["*"],
+    "Exclude": ["EX-TEST-*", "EX-LAB-*"],
+    "IncludeEdge": false,
+    "SiteFilter": []
+  },
+
+  "Checks": {
+    "Os": true,
+    "Disk": true,
+    "Services": true,
+    "Components": true,
+    "Health": true,
+    "Dag": true,
+    "Replication": true,
+    "Databases": true,
+    "Queues": true,
+    "BackPressure": true,
+    "Certificates": true,
+    "Mapi": false
+  },
+
+  "Thresholds": {
+    "DiskMode": "And",
+    "DiskFreePercentWarning": 20,
+    "DiskFreePercentCritical": 10,
+    "DiskFreeGBWarning": 60,
+    "DiskFreeGBCritical": 25,
+    "MinimumVolumeSizeGB": 5,
+
+    "MemoryFreePercentWarning": 6,
+    "MemoryFreePercentCritical": 3,
+    "CpuLoadPercentWarning": 95,
+    "UptimeMinutesMinimum": 15,
+
+    "QueueWarning": 100,
+    "QueueCritical": 500,
+    "SubmissionQueueWarning": 50,
+    "SubmissionQueueCritical": 250,
+    "PoisonQueueWarning": 1,
+    "RetryQueueWarning": 20,
+
+    "CopyQueueWarning": 10,
+    "CopyQueueCritical": 50,
+    "ReplayQueueWarning": 20,
+    "ReplayQueueCritical": 100,
+
+    "BackupAgeHoursWarning": 36,
+    "BackupAgeHoursCritical": 72,
+
+    "CertExpiryDaysWarning": 30,
+    "CertExpiryDaysCritical": 7,
+
+    "ThrottleLimit": 24,
+    "RemoteOpenTimeoutSeconds": 20,
+    "RemoteOperationTimeoutSeconds": 120
+  },
+
+  "VolumeOverrides": [
+    {
+      "_comment": "Volumi database molto grandi: conta solo il valore assoluto",
+      "ServerPattern": "*",
+      "VolumePattern": "*ExchangeVolumes*",
+      "Mode": "Or",
+      "FreeGBWarning": 150,
+      "FreeGBCritical": 75,
+      "FreePercentWarning": 0,
+      "FreePercentCritical": 0
+    },
+    {
+      "_comment": "Volume dei log di transazione: soglie piu strette",
+      "ServerPattern": "*",
+      "VolumePattern": "*LOG*",
+      "Mode": "Or",
+      "FreeGBWarning": 40,
+      "FreeGBCritical": 15,
+      "FreePercentWarning": 0,
+      "FreePercentCritical": 0
+    },
+    {
+      "_comment": "Disco di sistema",
+      "ServerPattern": "*",
+      "VolumePattern": "C:*",
+      "Mode": "Or",
+      "FreeGBWarning": 15,
+      "FreeGBCritical": 8,
+      "FreePercentWarning": 0,
+      "FreePercentCritical": 0
+    }
+  ],
+
+  "Ignore": {
+    "Services": [
+      "MSExchangePOP3",
+      "MSExchangePOP3BE",
+      "MSExchangeIMAP4",
+      "MSExchangeIMAP4BE",
+      "MSExchangeEdgeSync"
+    ],
+    "HealthSets": [
+      "FfoQuarantine",
+      "Monitoring",
+      "OutsideInHealth",
+      "Antimalware"
+    ],
+    "Volumes": [
+      "*System Reserved*",
+      "*Recovery*"
+    ],
+    "Databases": [
+      "RecoveryDB*"
+    ],
+    "Keys": [
+      "Uptime|EX-LAB-*|LastBoot"
+    ]
+  },
+
+  "ExtraServices": ["W3SVC", "WinRM", "RemoteRegistry"],
+
+  "Alerting": {
+    "CooldownMinutes": 120,
+    "SendRecovery": true,
+    "HeartbeatHours": 24,
+    "NotifyOnUnknown": true,
+    "MinimumSeverityToMail": "Warning"
+  },
+
+  "Mail": {
+    "Enabled": true,
+    "SmtpServers": ["ex-mbx-01.contoso.local", "ex-mbx-02.contoso.local"],
+    "Port": 25,
+    "UseSsl": false,
+    "UseDefaultCredentials": false,
+    "CredentialFile": "",
+    "From": "exchange-monitor@contoso.com",
+    "FromDisplayName": "Exchange Health Monitor",
+    "To": ["messaging-team@contoso.com"],
+    "Cc": [],
+    "SubjectPrefix": "[Exchange Health]",
+    "AttachCsv": true
+  },
+
+  "Paths": {
+    "LogDirectory": "Logs",
+    "ReportDirectory": "Reports",
+    "StateFile": "State\\alert-state.json",
+    "RetentionDays": 30
+  }
+}

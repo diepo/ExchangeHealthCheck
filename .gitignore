@@ -1,0 +1,15 @@
+# Configurazione reale: contiene FQDN dei server, indirizzi mail e host SMTP
+# dell'ambiente. Nel repo sta solo il template .example.json.
+ExchangeHealthCheck.config.json
+
+# Credenziali SMTP esportate con Export-Clixml (DPAPI, legate all'utente)
+*.cred.xml
+
+# Output di esecuzione: log, report CSV e stato degli alert contengono nomi di
+# server, database e code reali.
+Logs/
+Reports/
+State/
+
+# Cartelle di test create dalle esecuzioni di prova
+TestRun/
