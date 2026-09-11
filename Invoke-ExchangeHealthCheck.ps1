@@ -142,6 +142,7 @@ $DefaultConfigJson = @'
   "VolumeOverrides": [],
   "Ignore": {
     "Services": ["MSExchangePOP3", "MSExchangePOP3BE", "MSExchangeIMAP4", "MSExchangeIMAP4BE", "MSExchangeEdgeSync"],
+    "ServerComponents": ["ForwardSyncDaemon", "ProvisioningRps"],
     "HealthSets": ["FfoQuarantine", "Monitoring", "OutsideInHealth"],
     "Volumes": [],
     "Databases": [],
@@ -848,12 +849,25 @@ function Invoke-HcComponentCheck {
 
     if (-not (Test-HcCommand 'Get-ServerComponentState')) { return }
 
+    # Alcuni componenti sono Inactive per progetto su on-premises: esistono nel
+    # codice ma li usa solo il datacenter Microsoft (ForwardSyncDaemon,
+    # ProvisioningRps). Segnalarli significherebbe generare lo stesso falso
+    # positivo su ogni server, per sempre. Lista estendibile da configurazione.
+    $ignoreComponents = @($script:Config.Ignore.ServerComponents)
+
     $states = @(Get-ServerComponentState -Identity $Target.Name -ErrorAction Stop)
-    $inactive = @($states | Where-Object { $_.State -ne 'Active' })
+    $inactive = @($states | Where-Object {
+        if ($_.State -eq 'Active') { return $false }
+        $name = [string]$_.Component
+        foreach ($pattern in $ignoreComponents) {
+            if ($pattern -and $name -like $pattern) { return $false }
+        }
+        return $true
+    })
 
     if ($inactive.Count -eq 0) {
         Add-Finding -Category 'ComponentState' -Server $Target.Name -Item 'AllComponents' -Severity 'OK' `
-            -Message ('Tutti i {0} componenti sono Active.' -f $states.Count)
+            -Message ('Nessun componente inattivo da segnalare ({0} verificati).' -f $states.Count)
         return
     }
 

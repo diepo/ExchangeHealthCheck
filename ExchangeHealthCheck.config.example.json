@@ -108,6 +108,7 @@
       "MSExchangeIMAP4BE",
       "MSExchangeEdgeSync"
     ],
+    "ServerComponents": ["ForwardSyncDaemon", "ProvisioningRps"],
     "HealthSets": [
       "FfoQuarantine",
       "Monitoring",
