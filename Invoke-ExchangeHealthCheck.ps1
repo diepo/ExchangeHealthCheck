@@ -655,11 +655,35 @@ function Get-HcRemoteData {
         }
     }
 
-    Write-HcLog ('Raccolta dati OS su {0} server (throttle {1}, timeout connessione {2}s)...' -f $names.Count, $throttle, $openTimeout)
-    $errors = $null
-    $results = @(Invoke-Command -ComputerName $names -ScriptBlock $scriptBlock `
-        -ArgumentList $minVol, $extra -ThrottleLimit $throttle -SessionOption $sessionOption `
-        -ErrorAction SilentlyContinue -ErrorVariable errors)
+    # La macchina locale si interroga direttamente, senza passare da WinRM: una
+    # connessione di loopback verso se stessi richiede comunque listener,
+    # autenticazione Kerberos e SPN corretti, e fallisce per motivi che non hanno
+    # nulla a che vedere con la salute del server. Girando lo script su un
+    # Exchange server, e proprio quel server a fallire per primo.
+    $localName  = $env:COMPUTERNAME
+    $localNames = @($Targets | Where-Object { $_.Name -ieq $localName } |
+        ForEach-Object { if ($useFqdn -and $_.Fqdn) { $_.Fqdn } else { $_.Name } })
+    $remoteNames = @($names | Where-Object { $localNames -notcontains $_ })
+
+    $results = @()
+    $errors  = $null
+
+    if ($localNames.Count -gt 0) {
+        Write-HcLog ('Raccolta dati in locale su {0} (senza WinRM).' -f $localName)
+        try {
+            $results += & $scriptBlock $minVol $extra
+        }
+        catch {
+            Write-HcLog ('Raccolta locale su {0} fallita: {1}' -f $localName, $_.Exception.Message) -Level WARN
+        }
+    }
+
+    if ($remoteNames.Count -gt 0) {
+        Write-HcLog ('Raccolta dati OS su {0} server remoti (throttle {1}, timeout connessione {2}s)...' -f $remoteNames.Count, $throttle, $openTimeout)
+        $results += @(Invoke-Command -ComputerName $remoteNames -ScriptBlock $scriptBlock `
+            -ArgumentList $minVol, $extra -ThrottleLimit $throttle -SessionOption $sessionOption `
+            -ErrorAction SilentlyContinue -ErrorVariable errors)
+    }
 
     # Indicizzato sia sul nome corto sia su quello restituito dalla sessione: il
     # chiamante cerca per Name, ma qui si e connessi con l'FQDN.
