@@ -84,7 +84,9 @@ $DefaultConfigJson = @'
   "Organization": {
     "Name": "Exchange",
     "ConnectTo": "",
-    "ViewEntireForest": true
+    "ViewEntireForest": true,
+    "PreferredDomainController": "",
+    "PreferredGlobalCatalog": ""
   },
   "Servers": {
     "Include": ["*"],
@@ -294,6 +296,21 @@ function Test-HcCommand {
     return [bool](Get-Command -Name $Name -ErrorAction SilentlyContinue)
 }
 
+# Restituisce il primo valore non vuoto tra le proprieta indicate. Serve dove
+# cmdlet diversi (o versioni diverse di Exchange) espongono lo stesso dato con
+# nomi differenti: meglio leggere entrambe le forme che stampare campi vuoti.
+function Get-HcFirstValue {
+    param([object]$InputObject, [string[]]$PropertyNames)
+    if ($null -eq $InputObject) { return $null }
+    foreach ($name in $PropertyNames) {
+        if ($InputObject.PSObject.Properties.Name -contains $name) {
+            $value = $InputObject.$name
+            if ($null -ne $value -and [string]$value -ne '') { return $value }
+        }
+    }
+    return $null
+}
+
 # Esegue un blocco di check isolando le eccezioni: un check che esplode non deve
 # fermare l'intero giro, diventa un finding "Unknown".
 function Invoke-HcCheck {
@@ -343,9 +360,28 @@ function Connect-HcExchange {
         }
     }
 
-    if ($script:Config.Organization.ViewEntireForest -and (Test-HcCommand 'Set-ADServerSettings')) {
-        try { Set-ADServerSettings -ViewEntireForest $true -ErrorAction Stop } catch {
-            Write-HcLog ('Set-ADServerSettings fallito: {0}' -f $_.Exception.Message) -Level WARN
+    # Contesto AD della sessione. In foreste multi-dominio ViewEntireForest puo far
+    # risolvere gli oggetti su un DC di un altro dominio (anche solo trusted), con
+    # errori tipo "object '*\SERVER' could not be found on <DC>". In quel caso si
+    # mette ViewEntireForest a false oppure si fissa il DC del dominio corretto.
+    if (Test-HcCommand 'Set-ADServerSettings') {
+        $adSettings = @{}
+        if ($script:Config.Organization.ViewEntireForest) { $adSettings['ViewEntireForest'] = $true }
+
+        $preferredDc = [string]$script:Config.Organization.PreferredDomainController
+        if ($preferredDc) { $adSettings['PreferredServer'] = $preferredDc }
+
+        $preferredGc = [string]$script:Config.Organization.PreferredGlobalCatalog
+        if ($preferredGc) { $adSettings['PreferredGlobalCatalog'] = $preferredGc }
+
+        if ($adSettings.Count -gt 0) {
+            try {
+                Set-ADServerSettings @adSettings -ErrorAction Stop
+                Write-HcLog ('Contesto AD: {0}' -f (($adSettings.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value }) -join ', '))
+            }
+            catch {
+                Write-HcLog ('Set-ADServerSettings fallito: {0}' -f $_.Exception.Message) -Level WARN
+            }
         }
     }
 }
@@ -767,21 +803,47 @@ function Invoke-HcHealthCheck {
 
     $ignore = @($script:Config.Ignore.HealthSets)
     $report = @(Get-HealthReport -Identity $Target.Name -ErrorAction Stop)
-    $bad = @($report | Where-Object {
-        $_.AlertValue -eq 'Unhealthy' -and ($ignore -notcontains [string]$_.HealthSetName)
-    })
-    $degraded = @($report | Where-Object {
-        $_.AlertValue -eq 'Degraded' -and ($ignore -notcontains [string]$_.HealthSetName)
+
+    # Get-HealthReport espone il nome dell'health set in "Name" e l'orario in
+    # "LastTransitionTime"; "HealthSetName" e "FirstAlertObservedTime" sono invece
+    # di Get-ServerHealth. Leggendo solo le seconde i campi restavano vuoti e, cosa
+    # peggiore, la chiave di deduplica diventava identica per tutti gli health set
+    # (un solo alert al posto di uno per health set) e Ignore.HealthSets non
+    # matchava mai. Si leggono entrambe le forme.
+    $entries = foreach ($hs in $report) {
+        $name = [string](Get-HcFirstValue -InputObject $hs -PropertyNames @('Name', 'HealthSetName'))
+        if (-not $name) { $name = 'HealthSet sconosciuto' }
+        [pscustomobject]@{
+            Name       = $name
+            AlertValue = [string]$hs.AlertValue
+            Since      = Get-HcFirstValue -InputObject $hs -PropertyNames @('LastTransitionTime', 'FirstAlertObservedTime')
+        }
+    }
+
+    # L'esclusione accetta wildcard: "MSExchange*" oltre al nome esatto.
+    $monitored = @($entries | Where-Object {
+        $current = $_.Name
+        $skip = $false
+        foreach ($pattern in $ignore) {
+            if ($pattern -and $current -like $pattern) { $skip = $true; break }
+        }
+        -not $skip
     })
 
+    $bad      = @($monitored | Where-Object { $_.AlertValue -eq 'Unhealthy' })
+    $degraded = @($monitored | Where-Object { $_.AlertValue -eq 'Degraded' })
+
     foreach ($hs in $bad) {
-        Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item ([string]$hs.HealthSetName) -Severity 'Critical' `
-            -Message ('Health set "{0}" Unhealthy (dal {1}).' -f $hs.HealthSetName, $hs.FirstAlertObservedTime) `
-            -Value 'Unhealthy'
+        $since = ''
+        if ($hs.Since) { $since = ' (dal {0:yyyy-MM-dd HH:mm})' -f [datetime]$hs.Since }
+        Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item $hs.Name -Severity 'Critical' `
+            -Message ('Health set "{0}" Unhealthy{1}.' -f $hs.Name, $since) -Value 'Unhealthy'
     }
     foreach ($hs in $degraded) {
-        Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item ([string]$hs.HealthSetName) -Severity 'Warning' `
-            -Message ('Health set "{0}" Degraded.' -f $hs.HealthSetName) -Value 'Degraded'
+        $since = ''
+        if ($hs.Since) { $since = ' (dal {0:yyyy-MM-dd HH:mm})' -f [datetime]$hs.Since }
+        Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item $hs.Name -Severity 'Warning' `
+            -Message ('Health set "{0}" Degraded{1}.' -f $hs.Name, $since) -Value 'Degraded'
     }
     if ($bad.Count -eq 0 -and $degraded.Count -eq 0) {
         Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item 'AllHealthSets' -Severity 'OK' `

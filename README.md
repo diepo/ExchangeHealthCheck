@@ -198,6 +198,27 @@ dopo aver osservato i valori reali.
 
 ## Troubleshooting
 
+### "object '*\SERVER' could not be found on <domain controller>"
+
+Le ricerche AD della sessione stanno finendo su un domain controller che non vede
+l'oggetto: tipicamente un DC di **un altro dominio della foresta o di un dominio
+trusted**. Non e un problema del server Exchange, e di contesto AD.
+
+Nell'ordine, in `Organization`:
+
+1. **`"ViewEntireForest": false`** — la prima cosa da provare. Se
+   l'organizzazione Exchange vive in un solo dominio, la visione dell'intera
+   foresta non serve ed e proprio cio che allarga la ricerca ai DC sbagliati.
+2. **`"PreferredDomainController": "dc01.contoso.local"`** — fissa il DC del
+   dominio corretto per tutta la sessione (`Set-ADServerSettings -PreferredServer`).
+3. **`"PreferredGlobalCatalog": "gc01.contoso.local"`** — se il problema e sul
+   global catalog.
+
+All'avvio il log riporta il contesto applicato: `Contesto AD: ViewEntireForest=True, ...`
+
+Il check interessato fallisce da solo come finding `Unknown` senza fermare il
+resto, ma finche il contesto AD e sbagliato quei controlli non producono dati.
+
 ### "Nessun DAG rilevato sui server selezionati"
 
 Non e un errore: e il comportamento corretto su server standalone. I check DAG,

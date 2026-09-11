@@ -2,7 +2,9 @@
   "Organization": {
     "Name": "CONTOSO",
     "ConnectTo": "ex-mbx-01.contoso.local",
-    "ViewEntireForest": true
+    "ViewEntireForest": true,
+    "PreferredDomainController": "",
+    "PreferredGlobalCatalog": ""
   },
 
   "Servers": {
