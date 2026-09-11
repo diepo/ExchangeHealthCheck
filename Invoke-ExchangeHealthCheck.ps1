@@ -365,8 +365,11 @@ function Connect-HcExchange {
     # errori tipo "object '*\SERVER' could not be found on <DC>". In quel caso si
     # mette ViewEntireForest a false oppure si fissa il DC del dominio corretto.
     if (Test-HcCommand 'Set-ADServerSettings') {
-        $adSettings = @{}
-        if ($script:Config.Organization.ViewEntireForest) { $adSettings['ViewEntireForest'] = $true }
+        # Il valore va IMPOSTATO sempre, anche quando e false: limitarsi ad attivarlo
+        # quando e true lascia la sessione con l'impostazione che aveva gia (la EMS
+        # puo averla a true da profilo o da un'esecuzione precedente), e in
+        # configurazione si legge false mentre in realta e attivo.
+        $adSettings = @{ ViewEntireForest = [bool]$script:Config.Organization.ViewEntireForest }
 
         $preferredDc = [string]$script:Config.Organization.PreferredDomainController
         if ($preferredDc) { $adSettings['PreferredServer'] = $preferredDc }
@@ -955,7 +958,22 @@ function Invoke-HcCopyStatusCheck {
 
     $t = $script:Config.Thresholds
     $ignoreDb = @($script:Config.Ignore.Databases)
-    $copies = @(Get-MailboxDatabaseCopyStatus -Server $Target.Name -ErrorAction Stop)
+
+    # Con -Server, Exchange cerca l'identity "*\<server>". Se su quel server non
+    # esiste alcuna copia di database risponde "could not be found" invece di un
+    # risultato vuoto: e un'assenza di dati, non un guasto. Stesso messaggio anche
+    # quando l'oggetto esiste ma e fuori dallo scope RBAC dell'account.
+    try {
+        $copies = @(Get-MailboxDatabaseCopyStatus -Server $Target.Name -ErrorAction Stop)
+    }
+    catch {
+        if ($_.Exception.Message -match 'could not be found|non e stato trovato|couldn''t be found') {
+            Add-Finding -Category 'DatabaseCopy' -Server $Target.Name -Item 'Copies' -Severity 'Info' `
+                -Message ('Nessuna copia di database trovata su {0}: il server non ne ospita, oppure non sono visibili con lo scope RBAC dell''account corrente.' -f $Target.Name)
+            return
+        }
+        throw
+    }
 
     if ($copies.Count -eq 0) {
         Add-Finding -Category 'DatabaseCopy' -Server $Target.Name -Item 'Copies' -Severity 'Info' `
