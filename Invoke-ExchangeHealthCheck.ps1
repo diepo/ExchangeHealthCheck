@@ -140,10 +140,14 @@ $DefaultConfigJson = @'
     "RemoteOperationTimeoutSeconds": 120
   },
   "VolumeOverrides": [],
+  "HealthReport": {
+    "IncludeFailingMonitors": true,
+    "MaxMonitorsPerHealthSet": 5
+  },
   "Ignore": {
     "Services": ["MSExchangePOP3", "MSExchangePOP3BE", "MSExchangeIMAP4", "MSExchangeIMAP4BE", "MSExchangeEdgeSync"],
     "ServerComponents": ["ForwardSyncDaemon", "ProvisioningRps"],
-    "HealthSets": ["FfoQuarantine", "Monitoring", "OutsideInHealth"],
+    "HealthSets": ["FfoQuarantine", "Monitoring", "OutsideInHealth", "Imap", "Pop"],
     "Volumes": [],
     "Databases": [],
     "Keys": []
@@ -886,6 +890,48 @@ function Invoke-HcComponentCheck {
     }
 }
 
+# Get-HealthReport si ferma al livello dell'health set: dice CHE cosa non va, non
+# PERCHE. Il dettaglio sta un livello sotto, nei monitor, e si ottiene con
+# Get-ServerHealth. Viene interrogato solo per gli health set gia risultati non
+# sani, quindi il costo e proporzionale ai problemi, non al numero di health set.
+function Get-HcHealthSetDetail {
+    param(
+        [Parameter(Mandatory)][string]$ServerName,
+        [Parameter(Mandatory)][string]$HealthSetName
+    )
+
+    if (-not $script:Config.HealthReport.IncludeFailingMonitors) { return '' }
+    if (-not (Test-HcCommand 'Get-ServerHealth')) { return '' }
+    if ($HealthSetName -eq 'HealthSet sconosciuto') { return '' }
+
+    $maximum = [int]$script:Config.HealthReport.MaxMonitorsPerHealthSet
+    if ($maximum -le 0) { $maximum = 5 }
+
+    try {
+        $monitors = @(Get-ServerHealth -Identity $ServerName -HealthSet $HealthSetName -ErrorAction Stop |
+            Where-Object { $_.AlertValue -and $_.AlertValue -ne 'Healthy' -and $_.AlertValue -ne 'Disabled' })
+    }
+    catch {
+        Write-HcLog ('Dettaglio monitor di {0} su {1} non disponibile: {2}' -f $HealthSetName, $ServerName, $_.Exception.Message) -Level DEBUG
+        return ''
+    }
+
+    if ($monitors.Count -eq 0) { return '' }
+
+    $described = foreach ($monitor in ($monitors | Select-Object -First $maximum)) {
+        $name = [string](Get-HcFirstValue -InputObject $monitor -PropertyNames @('Name', 'MonitorIdentity'))
+        $target = [string]$monitor.TargetResource
+        if ($target) { '{0} [{1}] = {2}' -f $name, $target, $monitor.AlertValue }
+        else { '{0} = {1}' -f $name, $monitor.AlertValue }
+    }
+
+    $text = ' Monitor coinvolti: {0}' -f (($described) -join '; ')
+    if ($monitors.Count -gt $maximum) {
+        $text += ' (e altri {0}).' -f ($monitors.Count - $maximum)
+    }
+    return $text
+}
+
 function Invoke-HcHealthCheck {
     param([object]$Target)
 
@@ -941,14 +987,16 @@ function Invoke-HcHealthCheck {
     foreach ($hs in $bad) {
         $since = ''
         if ($hs.Since) { $since = ' (dal {0:yyyy-MM-dd HH:mm})' -f [datetime]$hs.Since }
+        $detail = Get-HcHealthSetDetail -ServerName $Target.Name -HealthSetName $hs.Name
         Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item $hs.Name -Severity 'Critical' `
-            -Message ('Health set "{0}" Unhealthy{1}.' -f $hs.Name, $since) -Value 'Unhealthy'
+            -Message ('Health set "{0}" Unhealthy{1}.{2}' -f $hs.Name, $since, $detail) -Value 'Unhealthy'
     }
     foreach ($hs in $degraded) {
         $since = ''
         if ($hs.Since) { $since = ' (dal {0:yyyy-MM-dd HH:mm})' -f [datetime]$hs.Since }
+        $detail = Get-HcHealthSetDetail -ServerName $Target.Name -HealthSetName $hs.Name
         Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item $hs.Name -Severity 'Warning' `
-            -Message ('Health set "{0}" Degraded{1}.' -f $hs.Name, $since) -Value 'Degraded'
+            -Message ('Health set "{0}" Degraded{1}.{2}' -f $hs.Name, $since, $detail) -Value 'Degraded'
     }
     if ($bad.Count -eq 0 -and $degraded.Count -eq 0) {
         Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item 'AllHealthSets' -Severity 'OK' `
