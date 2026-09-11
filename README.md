@@ -198,6 +198,35 @@ dopo aver osservato i valori reali.
 
 ## Troubleshooting
 
+### "Nessun DAG rilevato sui server selezionati"
+
+Non e un errore: e il comportamento corretto su server standalone. I check DAG,
+copie e `Test-ReplicationHealth` vengono semplicemente saltati; tutto il resto
+(servizi, dischi, database, code, certificati) viene eseguito normalmente.
+
+### Sembra bloccato dopo il messaggio sul DAG
+
+Subito dopo viene eseguito il check dei database. Le interrogazioni sono limitate
+ai server del perimetro e ai soli server che hanno risposto, proprio per evitare
+attese: i cmdlet Exchange non hanno timeout, quindi un `Get-MailboxDatabase
+-Status` su un server irraggiungibile resta appeso finche l'RPC non cede.
+
+Se rallenta ancora, con `-Verbose` vedi a che punto e (`Recupero database di
+<server>...`) e puoi isolare il check:
+
+```powershell
+.\Invoke-ExchangeHealthCheck.ps1 -Check Databases -NoMail -Verbose
+```
+
+Per misurare quanto costa davvero sul tuo ambiente:
+
+```powershell
+Measure-Command { Get-MailboxDatabase -Server EX-MBX-01 -Status } | Select-Object TotalSeconds
+```
+
+Se il tempo e concentrato li, disabilita `Databases` nei giri frequenti e tienilo
+in una seconda attivita pianificata piu rada, come per `Replication`.
+
 ### "WinRM cannot find the computer ..." su un server che e acceso
 
 E un problema di **risoluzione nome o di WinRM**, non di server giu. Lo script si

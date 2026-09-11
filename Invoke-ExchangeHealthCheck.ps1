@@ -962,7 +962,41 @@ function Invoke-HcDatabaseCheck {
     $ignoreDb   = @($script:Config.Ignore.Databases)
     $serverList = @($Targets | Select-Object -ExpandProperty Name)
 
-    $databases = @(Get-MailboxDatabase -Status -ErrorAction Stop)
+    # Interrogazione per server, non a livello di organizzazione: "Get-MailboxDatabase
+    # -Status" senza -Server enumera TUTTI i database della foresta e, per ricavare
+    # lo stato di mount, contatta ogni server proprietario. Basta un server lento o
+    # irraggiungibile fuori perimetro per far sembrare lo script bloccato, perche i
+    # cmdlet Exchange non hanno timeout.
+    $collectionRan = @($Targets | Where-Object { $_.Online }).Count -gt 0
+    $databases = @()
+    $seen = @{}
+
+    foreach ($target in $Targets) {
+        if ($collectionRan -and -not $target.Online) {
+            Write-HcLog ('{0} non raggiungibile: salto l''elenco database.' -f $target.Name) -Level DEBUG
+            continue
+        }
+
+        Write-HcLog ('Recupero database di {0}...' -f $target.Name) -Level DEBUG
+        try {
+            $serverDatabases = @(Get-MailboxDatabase -Server $target.Name -Status -ErrorAction Stop)
+        }
+        catch {
+            Add-Finding -Category 'Database' -Server $target.Name -Item 'Get-MailboxDatabase' -Severity 'Unknown' `
+                -Message ('Elenco database non recuperabile: {0}' -f $_.Exception.Message)
+            continue
+        }
+
+        # In un DAG lo stesso database torna una volta per copia: si tiene la prima.
+        foreach ($db in $serverDatabases) {
+            $id = [string]$db.Guid
+            if (-not $id) { $id = [string]$db.Name }
+            if ($seen.ContainsKey($id)) { continue }
+            $seen[$id] = $true
+            $databases += $db
+        }
+    }
+
     Write-HcLog ('Database rilevati: {0}' -f $databases.Count)
 
     foreach ($db in $databases) {
