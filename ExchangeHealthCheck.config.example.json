@@ -153,7 +153,8 @@
     "To": ["messaging-team@contoso.com"],
     "Cc": [],
     "SubjectPrefix": "[Exchange Health]",
-    "AttachCsv": true
+    "AttachCsv": true,
+    "IncludeQueueSummary": true
   },
 
   "Paths": {

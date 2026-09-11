@@ -73,6 +73,7 @@ $ProgressPreference    = 'SilentlyContinue'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
+$script:QueueSummary   = New-Object System.Collections.Generic.List[object]
 $script:LogFile        = $null
 $script:ExSession      = $null
 $script:CheckFilter    = $Check
@@ -172,7 +173,8 @@ $DefaultConfigJson = @'
     "To": ["messaging-team@contoso.com"],
     "Cc": [],
     "SubjectPrefix": "[Exchange Health]",
-    "AttachCsv": true
+    "AttachCsv": true,
+    "IncludeQueueSummary": true
   },
   "Paths": {
     "LogDirectory": "Logs",
@@ -214,15 +216,31 @@ function Resolve-HcPath {
 function Write-HcLog {
     param(
         [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('DEBUG','INFO','WARN','ERROR')][string]$Level = 'INFO'
+        [ValidateSet('DEBUG','INFO','WARN','ERROR')][string]$Level = 'INFO',
+        # Colore esplicito per la console. Serve ai finding, che hanno una severita
+        # propria: senza, Critical e Warning finirebbero entrambi in giallo e con
+        # -Verbose si confonderebbero con le righe di diagnostica.
+        [string]$Color,
+        # Riga di dettaglio: a video solo con -Verbose, ma sempre nel file di log.
+        [switch]$VerboseOnly
     )
     $line = '{0} [{1,-5}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    switch ($Level) {
-        'ERROR' { Write-Host $line -ForegroundColor Red }
-        'WARN'  { Write-Host $line -ForegroundColor Yellow }
-        'DEBUG' { Write-Verbose $line }
-        default { Write-Host $line }
+
+    $show = -not ($VerboseOnly -and $VerbosePreference -eq 'SilentlyContinue')
+    if ($show) {
+        if ($Color) {
+            Write-Host $line -ForegroundColor $Color
+        }
+        else {
+            switch ($Level) {
+                'ERROR' { Write-Host $line -ForegroundColor Red }
+                'WARN'  { Write-Host $line -ForegroundColor Yellow }
+                'DEBUG' { Write-Verbose $line }
+                default { Write-Host $line }
+            }
+        }
     }
+
     if ($script:LogFile) {
         try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch { }
     }
@@ -281,12 +299,19 @@ function Add-Finding {
         Key       = $key
     }
     $script:Findings.Add($finding) | Out-Null
-    if ((Get-SeverityRank $Severity) -ge 2) {
-        Write-HcLog ('{0} :: {1} :: {2} :: {3}' -f $Severity, $Category, $Server, $Message) -Level WARN
+
+    # Colore per severita: rosso i Critical, verde gli OK. I finding non allarmanti
+    # restano a video solo con -Verbose, ma finiscono comunque nel file di log.
+    switch ($Severity) {
+        'Critical' { $color = 'Red';     $level = 'ERROR' }
+        'Unknown'  { $color = 'Magenta'; $level = 'WARN'  }
+        'Warning'  { $color = 'Yellow';  $level = 'WARN'  }
+        'Info'     { $color = 'Cyan';    $level = 'INFO'  }
+        default    { $color = 'Green';   $level = 'INFO'  }
     }
-    else {
-        Write-HcLog ('{0} :: {1} :: {2} :: {3}' -f $Severity, $Category, $Server, $Message) -Level DEBUG
-    }
+    $detailOnly = ((Get-SeverityRank $Severity) -lt 2)
+    Write-HcLog ('{0,-8} {1,-22} {2,-18} {3}' -f $Severity.ToUpperInvariant(), $Category, $Server, $Message) `
+        -Level $level -Color $color -VerboseOnly:$detailOnly
 }
 
 function Test-CheckEnabled {
@@ -1320,6 +1345,35 @@ function Invoke-HcQueueCheck {
     Add-Finding -Category 'Queue' -Server $Target.Name -Item 'TotalMessages' -Severity $sev `
         -Message ('Totale messaggi in coda: {0} su {1} code attive.' -f $total, $realQueues.Count) -Value $total
 
+    # Fotografia delle code per la vista aggregata in mail: viene raccolta sempre,
+    # anche quando nulla supera soglia, perche il quadro del mail flow e utile di
+    # per se, non solo quando c'e un allarme.
+    $submissionQueue = @($realQueues | Where-Object { [string]$_.Identity -match 'Submission' })
+    $poisonQueue     = @($queues     | Where-Object { [string]$_.Identity -match 'Poison' })
+    $retryQueues     = @($realQueues | Where-Object { [string]$_.Status -eq 'Retry' })
+    $shadowQueues    = @($queues     | Where-Object { [string]$_.DeliveryType -eq 'ShadowRedundancy' })
+
+    $deliveryQueues = @($realQueues | Where-Object {
+        [string]$_.Identity -notmatch 'Submission|Poison'
+    } | Sort-Object { [int64]$_.MessageCount } -Descending)
+
+    $largest = $deliveryQueues | Select-Object -First 1
+    $shadowTotal = 0
+    foreach ($q in $shadowQueues) { $shadowTotal += [int64]$q.MessageCount }
+
+    $script:QueueSummary.Add([pscustomobject]@{
+        Server       = $Target.Name
+        Total        = $total
+        QueueCount   = $realQueues.Count
+        Submission   = if ($submissionQueue) { [int64]($submissionQueue | Measure-Object -Property MessageCount -Sum).Sum } else { 0 }
+        Poison       = if ($poisonQueue)     { [int64]($poisonQueue     | Measure-Object -Property MessageCount -Sum).Sum } else { 0 }
+        RetryCount   = $retryQueues.Count
+        ShadowTotal  = $shadowTotal
+        LargestName  = if ($largest) { [string]$largest.NextHopDomain } else { '' }
+        LargestCount = if ($largest) { [int64]$largest.MessageCount } else { 0 }
+        Severity     = $sev
+    }) | Out-Null
+
     foreach ($q in $realQueues) {
         $identity = [string]$q.Identity
         $count    = [int64]$q.MessageCount
@@ -1646,6 +1700,7 @@ function New-HcMailBody {
         [object]$AlertResult,
         [object[]]$AllFindings,
         [object[]]$Targets,
+        [object[]]$QueueSummary,
         [switch]$Heartbeat
     )
 
@@ -1696,6 +1751,50 @@ function New-HcMailBody {
                 (ConvertTo-HcHtmlText $rec.Server), (ConvertTo-HcHtmlText $rec.Category), (ConvertTo-HcHtmlText $rec.Item), $dur, (ConvertTo-HcHtmlText $rec.Message)))
         }
         [void]$sb.AppendLine('</table>')
+    }
+
+    # Vista aggregata delle code: mostrata sempre, non solo in presenza di alert.
+    # Il quadro del mail flow serve anche per confermare che sia tutto scorrevole.
+    $queues = @($QueueSummary)
+    if ($queues.Count -gt 0 -and $script:Config.Mail.IncludeQueueSummary) {
+        $grandTotal = 0
+        foreach ($row in $queues) { $grandTotal += [int64]$row.Total }
+
+        [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:22px 0 6px 0;'>Code di trasporto - $grandTotal messaggi su $($queues.Count) server</h3>")
+        [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
+        [void]$sb.AppendLine("<tr style='background:#f4f6f7;text-align:left;'>" +
+            "<th style='border:1px solid #dfe4e6;'>Server</th>" +
+            "<th style='border:1px solid #dfe4e6;'>In coda</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Code attive</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Submission</th>" +
+            "<th style='border:1px solid #dfe4e6;'>In retry</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Poison</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Coda maggiore</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Shadow</th></tr>")
+
+        foreach ($row in ($queues | Sort-Object { [int64]$_.Total } -Descending)) {
+            $color = Get-HcSeverityColor $row.Severity
+            $largest = '-'
+            if ($row.LargestName) { $largest = '{0} ({1})' -f $row.LargestName, $row.LargestCount }
+            $poisonStyle = if ([int64]$row.Poison -gt 0) { "color:#e67e22;font-weight:600;" } else { '' }
+            $retryStyle  = if ([int64]$row.RetryCount -gt 0) { "color:#e67e22;font-weight:600;" } else { '' }
+
+            $template = "<tr>" +
+                "<td style='border:1px solid #dfe4e6;font-weight:600;'>{0}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:right;color:{1};font-weight:600;'>{2}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:right;'>{3}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:right;'>{4}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:right;{5}'>{6}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:right;{7}'>{8}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{9}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:right;color:#95a5a6;'>{10}</td></tr>"
+            $html = $template -f (ConvertTo-HcHtmlText $row.Server), $color, $row.Total, $row.QueueCount,
+                                 $row.Submission, $retryStyle, $row.RetryCount, $poisonStyle, $row.Poison,
+                                 (ConvertTo-HcHtmlText $largest), $row.ShadowTotal
+            [void]$sb.AppendLine($html)
+        }
+        [void]$sb.AppendLine('</table>')
+        [void]$sb.AppendLine("<p style='font-family:Segoe UI,Arial,sans-serif;font-size:11px;color:#95a5a6;margin:4px 0 0 0;'>Le code Shadow Redundancy trattengono messaggi per progetto e non rientrano nei totali.</p>")
     }
 
     # Riepilogo per server: utile per capire a colpo d'occhio chi sta male
@@ -1934,7 +2033,7 @@ try {
     $mailSent = $false
     if ($shouldSend) {
         $isHeartbeat = ($toNotify.Count -eq 0 -and -not $sendRecovery)
-        $body = New-HcMailBody -AlertResult $alerts -AllFindings $allFindings -Targets $targets -Heartbeat:$isHeartbeat
+        $body = New-HcMailBody -AlertResult $alerts -AllFindings $allFindings -Targets $targets -QueueSummary $script:QueueSummary.ToArray() -Heartbeat:$isHeartbeat
 
         $criticalCount = @($toNotify | Where-Object { $_.Severity -eq 'Critical' }).Count
         $warningCount  = @($toNotify | Where-Object { $_.Severity -in @('Warning','Unknown') }).Count
