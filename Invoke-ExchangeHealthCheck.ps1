@@ -383,6 +383,22 @@ function Connect-HcExchange {
                 Write-HcLog ('Set-ADServerSettings fallito: {0}' -f $_.Exception.Message) -Level WARN
             }
         }
+
+        # Cosa sta davvero usando la sessione: gli oggetti server di Exchange stanno
+        # nel Configuration NC, replicato a tutti i DC della STESSA foresta. Un DC di
+        # una foresta trusted non li vedra mai, e l'errore e "could not be found".
+        if (Test-HcCommand 'Get-ADServerSettings') {
+            try {
+                $effective = Get-ADServerSettings -ErrorAction Stop
+                Write-HcLog ('AD in uso -> ViewEntireForest={0} | DomainController={1} | GlobalCatalog={2}' -f `
+                    $effective.ViewEntireForest,
+                    (@($effective.PreferredDomainControllers) -join ','),
+                    $effective.DefaultGlobalCatalog)
+            }
+            catch {
+                Write-HcLog ('Get-ADServerSettings non disponibile: {0}' -f $_.Exception.Message) -Level DEBUG
+            }
+        }
     }
 }
 
@@ -810,9 +826,24 @@ function Invoke-HcHealthCheck {
     # peggiore, la chiave di deduplica diventava identica per tutti gli health set
     # (un solo alert al posto di uno per health set) e Ignore.HealthSets non
     # matchava mai. Si leggono entrambe le forme.
+    $schemaLogged = $false
     $entries = foreach ($hs in $report) {
-        $name = [string](Get-HcFirstValue -InputObject $hs -PropertyNames @('Name', 'HealthSetName'))
-        if (-not $name) { $name = 'HealthSet sconosciuto' }
+        $name = [string](Get-HcFirstValue -InputObject $hs `
+            -PropertyNames @('HealthSetName', 'Name', 'HealthSet', 'HealthSetIdentity', 'Identity'))
+
+        # Se nessuno dei nomi noti restituisce un valore, invece di mostrare un
+        # segnaposto inutile si logga lo schema reale dell'oggetto: cosi si vede
+        # subito quale proprieta va letta su questa versione di Exchange.
+        if (-not $name) {
+            if (-not $schemaLogged) {
+                $available = ($hs.PSObject.Properties |
+                    Where-Object { $_.Value -ne $null -and [string]$_.Value -ne '' } |
+                    ForEach-Object { '{0}={1}' -f $_.Name, $_.Value }) -join ' | '
+                Write-HcLog ('Nome health set non riconosciuto su {0}. Proprieta disponibili: {1}' -f $Target.Name, $available) -Level WARN
+                $schemaLogged = $true
+            }
+            $name = 'HealthSet sconosciuto'
+        }
         [pscustomobject]@{
             Name       = $name
             AlertValue = [string]$hs.AlertValue
