@@ -196,6 +196,39 @@ Nota sulla memoria: Exchange usa quasi tutta la RAM per la cache dello Store, pe
 progetto. Le soglie di default sono volutamente basse (6% / 3%); alzarle solo
 dopo aver osservato i valori reali.
 
+## Troubleshooting
+
+### "WinRM cannot find the computer ..." su un server che e acceso
+
+E un problema di **risoluzione nome o di WinRM**, non di server giu. Lo script si
+connette usando l'FQDN restituito da `Get-ExchangeServer`
+(`Servers.UseFqdnForRemoting`, default `true`); se anche cosi fallisce, verifica
+nell'ordine, dall'host che esegue lo script:
+
+```powershell
+Resolve-DnsName ex01.contoso.local          # il nome si risolve?
+Test-NetConnection ex01.contoso.local -Port 5985   # la porta WinRM risponde?
+Test-WSMan ex01.contoso.local               # WinRM e attivo e risponde?
+Invoke-Command -ComputerName ex01.contoso.local -ScriptBlock { $env:COMPUTERNAME }
+```
+
+Cause tipiche, in ordine di frequenza:
+
+* **il nome corto non si risolve** perche l'host di monitoraggio ha un suffisso
+  DNS diverso: risolto usando l'FQDN (comportamento di default);
+* **WinRM non abilitato** sul server target: `Enable-PSRemoting -Force` oppure
+  `winrm quickconfig` sul server;
+* **firewall**: TCP 5985 (HTTP) chiuso tra host di monitoraggio e server;
+* **host non joinato al dominio**: Kerberos non funziona, servirebbero TrustedHosts
+  o HTTPS. Esegui lo script da una macchina in dominio;
+* **permessi**: l'account non e amministratore locale sul server target (l'errore
+  in quel caso parla di accesso negato, non di computer non trovato).
+
+Se in quell'ambiente funziona solo il nome corto, imposta
+`"Servers": { "UseFqdnForRemoting": false }`.
+
+Il log indica sempre **quale** server ha fallito: `Errore remoto su <server>: ...`
+
 ## Uso interattivo
 
 ```powershell

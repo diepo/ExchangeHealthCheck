@@ -90,6 +90,7 @@ $DefaultConfigJson = @'
     "Include": ["*"],
     "Exclude": [],
     "IncludeEdge": false,
+    "UseFqdnForRemoting": true,
     "SiteFilter": []
   },
   "Checks": {
@@ -428,7 +429,17 @@ function Get-HcTargetServer {
 function Get-HcRemoteData {
     param([Parameter(Mandatory)][object[]]$Targets)
 
-    $names   = @($Targets | Select-Object -ExpandProperty Name)
+    # Per il remoting si preferisce l'FQDN: il nome corto dipende dal suffisso DNS
+    # dell'host che esegue lo script e con Kerberos fallisce come
+    # "Cannot find the computer ..." anche se il server e perfettamente attivo.
+    # Servers.UseFqdnForRemoting = false per tornare al nome corto.
+    $useFqdn = $true
+    if ($null -ne $script:Config.Servers.UseFqdnForRemoting) {
+        $useFqdn = [bool]$script:Config.Servers.UseFqdnForRemoting
+    }
+    $names = @($Targets | ForEach-Object {
+        if ($useFqdn -and $_.Fqdn) { $_.Fqdn } else { $_.Name }
+    })
     $minVol  = [double]$script:Config.Thresholds.MinimumVolumeSizeGB
     $extra   = @($script:Config.ExtraServices)
     $throttle = [int]$script:Config.Thresholds.ThrottleLimit
@@ -507,15 +518,25 @@ function Get-HcRemoteData {
         -ArgumentList $minVol, $extra -ThrottleLimit $throttle -SessionOption $sessionOption `
         -ErrorAction SilentlyContinue -ErrorVariable errors)
 
+    # Indicizzato sia sul nome corto sia su quello restituito dalla sessione: il
+    # chiamante cerca per Name, ma qui si e connessi con l'FQDN.
     $map = @{}
     foreach ($res in $results) {
-        $key = [string]$res.PSComputerName
-        if (-not $key) { $key = [string]$res.ComputerName }
-        $map[$key.ToUpperInvariant()] = $res
+        $keys = @()
+        if ($res.PSComputerName) {
+            $keys += [string]$res.PSComputerName
+            $keys += ([string]$res.PSComputerName -split '\.')[0]
+        }
+        if ($res.ComputerName) { $keys += [string]$res.ComputerName }
+        foreach ($key in ($keys | Select-Object -Unique)) {
+            if ($key) { $map[$key.ToUpperInvariant()] = $res }
+        }
     }
 
     foreach ($err in @($errors)) {
-        Write-HcLog ('Errore remoto: {0}' -f $err.Exception.Message) -Level WARN
+        $failed = [string]$err.TargetObject
+        if (-not $failed) { $failed = 'server non identificato' }
+        Write-HcLog ('Errore remoto su {0}: {1}' -f $failed, $err.Exception.Message) -Level WARN
     }
 
     return $map
