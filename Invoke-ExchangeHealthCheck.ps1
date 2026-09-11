@@ -85,6 +85,7 @@ $DefaultConfigJson = @'
     "Name": "Exchange",
     "ConnectTo": "",
     "ViewEntireForest": true,
+    "AutoDetectDomainController": true,
     "PreferredDomainController": "",
     "PreferredGlobalCatalog": ""
   },
@@ -402,6 +403,62 @@ function Connect-HcExchange {
                 Write-HcLog ('Get-ADServerSettings non disponibile: {0}' -f $_.Exception.Message) -Level DEBUG
             }
         }
+    }
+}
+
+# Individua un domain controller VIVO nel dominio indicato. FindOne() fa una vera
+# chiamata al locator, quindi restituisce un DC che risponde adesso: la ricerca si
+# ripete a ogni esecuzione, senza fissare per sempre un DC che domani potrebbe
+# essere spento. Usa System.DirectoryServices.ActiveDirectory, presente su ogni
+# Windows: nessuna dipendenza da RSAT o dal modulo ActiveDirectory.
+function Resolve-HcDomainController {
+    param([Parameter(Mandatory)][string]$DomainName)
+    try {
+        $context = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext('Domain', $DomainName)
+        $controller = [System.DirectoryServices.ActiveDirectory.DomainController]::FindOne($context)
+        return [string]$controller.Name
+    }
+    catch {
+        Write-HcLog ('Nessun domain controller trovato per "{0}": {1}' -f $DomainName, $_.Exception.Message) -Level WARN
+        return $null
+    }
+}
+
+# Il dominio dei server Exchange si ricava dal loro FQDN: si prende il suffisso
+# piu diffuso, cosi un singolo server anomalo non sposta la scelta.
+function Get-HcServerDomain {
+    param([Parameter(Mandatory)][object[]]$Targets)
+    $suffixes = @($Targets |
+        Where-Object { $_.Fqdn -and $_.Fqdn.Contains('.') } |
+        ForEach-Object { ($_.Fqdn -split '\.', 2)[1] })
+    if ($suffixes.Count -eq 0) { return $null }
+    return ($suffixes | Group-Object | Sort-Object Count -Descending | Select-Object -First 1).Name
+}
+
+# Aggancia la sessione a un DC del dominio in cui vivono i server Exchange.
+# Chiamata dopo aver risolto il perimetro, quando gli FQDN sono noti.
+function Set-HcAutoDomainController {
+    param([Parameter(Mandatory)][object[]]$Targets)
+
+    if (-not (Test-HcCommand 'Set-ADServerSettings')) { return }
+    if ([string]$script:Config.Organization.PreferredDomainController) { return }  # scelta esplicita: si rispetta
+    if (-not $script:Config.Organization.AutoDetectDomainController) { return }
+
+    $domain = Get-HcServerDomain -Targets $Targets
+    if (-not $domain) {
+        Write-HcLog 'Dominio dei server Exchange non deducibile dagli FQDN: lascio la scelta del DC a Exchange.' -Level DEBUG
+        return
+    }
+
+    $controller = Resolve-HcDomainController -DomainName $domain
+    if (-not $controller) { return }
+
+    try {
+        Set-ADServerSettings -PreferredServer $controller -ErrorAction Stop
+        Write-HcLog ('Domain controller rilevato automaticamente per il dominio "{0}": {1}' -f $domain, $controller)
+    }
+    catch {
+        Write-HcLog ('Impossibile agganciare il DC {0}: {1}' -f $controller, $_.Exception.Message) -Level WARN
     }
 }
 
@@ -1710,6 +1767,9 @@ try {
 
     # --- Perimetro
     $targets = Get-HcTargetServer
+
+    # --- Aggancio a un DC del dominio dei server (solo se non ne e stato imposto uno)
+    Set-HcAutoDomainController -Targets $targets
 
     # --- Dati OS in parallelo
     $remoteData = @{}
