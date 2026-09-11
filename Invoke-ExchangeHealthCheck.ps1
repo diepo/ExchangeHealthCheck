@@ -95,6 +95,7 @@ $DefaultConfigJson = @'
     "Exclude": [],
     "IncludeEdge": false,
     "UseFqdnForRemoting": true,
+    "SkipExchangeChecksWhenOffline": true,
     "SiteFilter": []
   },
   "Checks": {
@@ -1033,6 +1034,33 @@ function Invoke-HcHealthCheck {
 
 #region ------------------------------------------------------------- CHECK DAG
 
+# Il cluster di un DAG si raggiunge per nome solo se il DAG ha un Administrative
+# Access Point. Senza (default dei DAG moderni) il nome non e risolvibile e serve
+# passare da un nodo membro: si prova prima il nome del DAG, poi i membri.
+function Get-HcClusterNode {
+    param(
+        [Parameter(Mandatory)][string]$ClusterName,
+        [string[]]$FallbackHosts
+    )
+
+    $attempts = @($ClusterName) + @($FallbackHosts)
+    $failures = @()
+
+    foreach ($endpoint in ($attempts | Where-Object { $_ } | Select-Object -Unique)) {
+        try {
+            $nodes = @(Get-ClusterNode -Cluster $endpoint -ErrorAction Stop)
+            if ($nodes.Count -gt 0) {
+                return [pscustomobject]@{ Nodes = $nodes; Endpoint = $endpoint; Error = $null }
+            }
+        }
+        catch {
+            $failures += ('{0}: {1}' -f $endpoint, $_.Exception.Message)
+        }
+    }
+
+    return [pscustomobject]@{ Nodes = @(); Endpoint = $null; Error = ($failures -join ' | ') }
+}
+
 function Invoke-HcDagCheck {
     param([object[]]$Targets)
 
@@ -1072,23 +1100,39 @@ function Invoke-HcDagCheck {
                     -Message ('Witness OK ({0}, {1}).' -f $dag.WitnessServer, $witnessState) -Value $witnessState
             }
 
-            # Nodi del cluster sottostante
+            # Nodi del cluster sottostante. Un DAG creato senza Administrative
+            # Access Point (il default dei DAG moderni) non ha un IP ne un nome
+            # risolvibile: "error opening cluster DAG1" e quello, non un guasto.
+            # In quel caso si interroga il cluster passando da un nodo membro.
             if (Test-HcCommand 'Get-ClusterNode') {
-                try {
-                    $nodes = @(Get-ClusterNode -Cluster $dagName -ErrorAction Stop)
-                    foreach ($node in $nodes) {
+                $members = @($Targets | Where-Object { $_.Dag -eq $dagName } | Select-Object -ExpandProperty Name)
+                if ($members.Count -eq 0) {
+                    $members = @($dag.StartedMailboxServers | ForEach-Object { ([string]$_ -split '\.')[0] })
+                }
+
+                $cluster = Get-HcClusterNode -ClusterName $dagName -FallbackHosts (@($members) | Select-Object -First 2)
+
+                if ($cluster.Nodes.Count -gt 0) {
+                    if ($cluster.Endpoint -ne $dagName) {
+                        Write-HcLog ('Cluster {0} raggiunto tramite il nodo {1} (nome del cluster non risolvibile: DAG senza access point).' -f $dagName, $cluster.Endpoint)
+                    }
+                    foreach ($node in $cluster.Nodes) {
                         if ([string]$node.State -ne 'Up') {
                             Add-Finding -Category 'Cluster' -Server $dagName -Item ([string]$node.Name) -Severity 'Critical' `
                                 -Message ('Nodo cluster {0} in stato {1}.' -f $node.Name, $node.State) -Value ([string]$node.State)
                         }
                     }
-                    if (@($nodes | Where-Object { [string]$_.State -ne 'Up' }).Count -eq 0) {
+                    if (@($cluster.Nodes | Where-Object { [string]$_.State -ne 'Up' }).Count -eq 0) {
                         Add-Finding -Category 'Cluster' -Server $dagName -Item 'Nodes' -Severity 'OK' `
-                            -Message ('Tutti i {0} nodi cluster sono Up.' -f $nodes.Count)
+                            -Message ('Tutti i {0} nodi cluster sono Up.' -f $cluster.Nodes.Count)
                     }
                 }
-                catch {
-                    Write-HcLog ('Get-ClusterNode su {0} non disponibile: {1}' -f $dagName, $_.Exception.Message) -Level DEBUG
+                else {
+                    # Nessun allarme: lo stato dei membri del DAG e gia verificato
+                    # dai cmdlet Exchange, questo controllo e solo una conferma.
+                    Add-Finding -Category 'Cluster' -Server $dagName -Item 'Nodes' -Severity 'Info' `
+                        -Message ('Stato dei nodi cluster non interrogabile per {0} (verificare RSAT Failover Clustering e i permessi sul cluster). Lo stato dei membri del DAG resta verificato via Exchange.' -f $dagName)
+                    Write-HcLog ('Get-ClusterNode non disponibile per {0}: {1}' -f $dagName, $cluster.Error) -Level DEBUG
                 }
             }
         }
@@ -1966,10 +2010,20 @@ try {
         if (Test-CheckEnabled 'Disk')     { Invoke-HcCheck -Category 'Disk'     -ServerName $target.Name -Body { Invoke-HcDiskCheck    -Target $target -Data $data } }
         if (Test-CheckEnabled 'Services') { Invoke-HcCheck -Category 'Service'  -ServerName $target.Name -Body { Invoke-HcServiceCheck -Target $target -Data $data } }
 
-        # I check basati su cmdlet Exchange hanno senso solo se il server risponde
+        # WinRM e i cmdlet Exchange sono due canali diversi: un server puo essere
+        # vivo e sano ma avere WinRM chiuso. Di default si salta comunque, per non
+        # restare appesi ai timeout RPC su un server davvero morto; chi sa che si
+        # tratta solo di accesso bloccato puo proseguire.
         if (-not $target.Online) {
-            Write-HcLog ('{0} non raggiungibile: salto i check Exchange-side.' -f $target.Name) -Level WARN
-            continue
+            $skipWhenOffline = $true
+            if ($null -ne $script:Config.Servers.SkipExchangeChecksWhenOffline) {
+                $skipWhenOffline = [bool]$script:Config.Servers.SkipExchangeChecksWhenOffline
+            }
+            if ($skipWhenOffline) {
+                Write-HcLog ('{0} non raggiungibile via WinRM: salto i check Exchange-side.' -f $target.Name) -Level WARN
+                continue
+            }
+            Write-HcLog ('{0} non raggiungibile via WinRM: proseguo comunque con i check Exchange-side.' -f $target.Name) -Level WARN
         }
 
         if (Test-CheckEnabled 'Components')   { Invoke-HcCheck -Category 'ComponentState'      -ServerName $target.Name -Body { Invoke-HcComponentCheck   -Target $target } }
