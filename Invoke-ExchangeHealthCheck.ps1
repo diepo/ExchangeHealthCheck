@@ -1810,6 +1810,25 @@ function Invoke-HcMapiCheck {
 
 #region ------------------------------------------------------------ ALERT STATE
 
+# Cast sicuro per date lette dal file di stato: quel file e dati esterni e
+# mutabili (scritto da un'esecuzione precedente, magari di una versione piu
+# vecchia dello script, o alterato a mano) - un valore che [datetime] non sa
+# interpretare non deve mai far cadere l'intero giro. Su un valore non
+# convertibile, logga e restituisce $null: il chiamante lo tratta come "data
+# sconosciuta", non come un errore fatale.
+function ConvertTo-HcSafeDateTime {
+    param([object]$Value, [string]$Context = 'valore')
+
+    if ($null -eq $Value -or [string]$Value -eq '') { return $null }
+    try {
+        return [datetime]$Value
+    }
+    catch {
+        Write-HcLog ('Data non interpretabile nello stato ({0}): {1} -> trattata come sconosciuta. Se persiste su piu esecuzioni, valuta di cancellare State\alert-state.json.' -f $Context, $_.Exception.Message) -Level WARN
+        return $null
+    }
+}
+
 function Get-HcState {
     param([string]$Path)
     if ($Path -and (Test-Path -LiteralPath $Path)) {
@@ -1881,7 +1900,7 @@ function Resolve-HcAlert {
             $prevRank = Get-SeverityRank ([string]$previous.Severity)
             $currRank = Get-SeverityRank $finding.Severity
             $lastNotified = $null
-            if ($previous.LastNotified) { $lastNotified = [datetime]$previous.LastNotified }
+            if ($previous.LastNotified) { $lastNotified = ConvertTo-HcSafeDateTime -Value $previous.LastNotified -Context "LastNotified di $key" }
 
             $shouldNotify = $false
             if ($currRank -gt $prevRank) { $escalated.Add($finding) | Out-Null; $shouldNotify = $true }
@@ -1915,7 +1934,10 @@ function Resolve-HcAlert {
                 Severity   = [string]$prop.Value.Severity
                 Message    = [string]$prop.Value.Message
                 FirstSeen  = $prop.Value.FirstSeen
-                Duration   = if ($prop.Value.FirstSeen) { ($now - [datetime]$prop.Value.FirstSeen) } else { $null }
+                Duration   = $(
+                    $firstSeenSafe = ConvertTo-HcSafeDateTime -Value $prop.Value.FirstSeen -Context "FirstSeen di $($prop.Name)"
+                    if ($firstSeenSafe) { $now - $firstSeenSafe } else { $null }
+                )
             }) | Out-Null
         }
     }
@@ -1961,20 +1983,33 @@ function Get-HcSeverityColor {
 function Get-HcCategorySummary {
     param([object[]]$Findings)
 
-    # Conta le occorrenze DISTINTE (stesso Item + stesso testo del messaggio),
-    # non ogni singolo finding. Lo stesso health set Unhealthy, la stessa causa
-    # di un witness irraggiungibile, lo stesso certificato in scadenza spesso
-    # vengono rilevati IDENTICI su piu server dello stesso DAG: sommarli uno per
-    # server gonfia il numero (25) senza indicare 25 problemi reali (magari solo
-    # 3, ciascuno visto da piu server). Item da solo non basta come chiave: due
-    # dischi "C:" pieni su server diversi condividono l'etichetta ma sono due
-    # problemi realmente distinti, e li distingue solo il testo del messaggio
-    # (GB liberi reali diversi) - per questo la deduplica e su Item+Message
-    # insieme, non sul solo Item.
+    # Conta le occorrenze DISTINTE (stesso Item + stesso Value), non ogni
+    # singolo finding. Lo stesso health set Unhealthy, la stessa causa di un
+    # witness irraggiungibile, lo stesso certificato in scadenza spesso
+    # vengono rilevati IDENTICI su piu server dello stesso DAG: sommarli uno
+    # per server gonfia il numero (es. 25) senza indicare altrettanti problemi
+    # reali (magari solo 3, ciascuno visto da piu server).
+    #
+    # Deduplica su Item+Value, NON su Item+Message: il testo del messaggio
+    # spesso incorpora un dettaglio che varia da server a server anche quando
+    # il problema di fondo e identico - tipicamente un timestamp con la
+    # precisione al minuto (es. "Health set ... Unhealthy (dal 14:20)."), che
+    # ogni server valuta al proprio istante e che quindi differisce quasi
+    # sempre anche a parita di causa. Con Item+Message quel dettaglio volatile
+    # avrebbe vanificato la deduplica (verificato: 15 invece di 3 su un caso
+    # reale). Value invece, per le categorie dove la stessa condizione ricorre
+    # su piu server (ManagedAvailability, ComponentState, Replication), e
+    # costante ("Unhealthy", "Inactive", "Failed") perche riflette la sola
+    # severita, non l'istante di rilevazione - collassa correttamente.
+    #
+    # Item da solo non basta come chiave alternativa: due dischi "C:" pieni su
+    # server diversi condividono l'etichetta ma sono due problemi realmente
+    # distinti, e li distingue proprio Value (GB liberi reali diversi). Stesso
+    # discorso per Queue (Value e il conteggio reale di quel server).
     $rows = foreach ($group in ($Findings | Group-Object Category)) {
         $counts = @{}
         foreach ($sev in @('Critical', 'Warning', 'Unknown', 'Info', 'OK')) {
-            $counts[$sev] = @($group.Group | Where-Object Severity -eq $sev | Group-Object Item, Message).Count
+            $counts[$sev] = @($group.Group | Where-Object Severity -eq $sev | Group-Object Item, Value).Count
         }
         $topSeverity = 'OK'
         foreach ($sev in @('Critical', 'Unknown', 'Warning', 'Info')) {
@@ -2538,8 +2573,9 @@ try {
     $heartbeatHours = [double]$script:Config.Alerting.HeartbeatHours
     $needHeartbeat = $false
     if ($heartbeatHours -gt 0) {
-        if (-not $state.LastHeartbeat) { $needHeartbeat = $true }
-        elseif (((Get-Date) - [datetime]$state.LastHeartbeat).TotalHours -ge $heartbeatHours) { $needHeartbeat = $true }
+        $lastHeartbeatSafe = ConvertTo-HcSafeDateTime -Value $state.LastHeartbeat -Context 'LastHeartbeat'
+        if (-not $lastHeartbeatSafe) { $needHeartbeat = $true }
+        elseif (((Get-Date) - $lastHeartbeatSafe).TotalHours -ge $heartbeatHours) { $needHeartbeat = $true }
     }
 
     $sendRecovery = ([bool]$script:Config.Alerting.SendRecovery -and $recovered.Count -gt 0)
