@@ -107,7 +107,10 @@
   },
   "Queues": {
     "ResolveNextHopHostnames": true,
-    "ReverseDnsTimeoutMs": 1000
+    "ReverseDnsTimeoutMs": 1000,
+    "TryNetBiosFallback": true,
+    "NetBiosTimeoutMs": 1500,
+    "ResolveSendConnectorName": true
   },
   "Ignore": {
     "Services": [

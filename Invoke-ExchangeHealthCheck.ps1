@@ -148,7 +148,10 @@ $DefaultConfigJson = @'
   },
   "Queues": {
     "ResolveNextHopHostnames": true,
-    "ReverseDnsTimeoutMs": 1000
+    "ReverseDnsTimeoutMs": 1000,
+    "TryNetBiosFallback": true,
+    "NetBiosTimeoutMs": 1500,
+    "ResolveSendConnectorName": true
   },
   "Ignore": {
     "Services": ["MSExchangePOP3", "MSExchangePOP3BE", "MSExchangeIMAP4", "MSExchangeIMAP4BE", "MSExchangeEdgeSync"],
@@ -1444,10 +1447,60 @@ function Resolve-HcReverseDns {
     return $resolved
 }
 
+# Fallback quando manca un record PTR in DNS. In molte reti aziendali, in
+# particolare quelle piu datate, le zone di reverse lookup non sono tenute
+# aggiornate quanto quelle dirette: "ping -a" su Windows spesso risolve
+# comunque il nome perche il resolver di sistema, oltre al DNS, prova anche il
+# NetBIOS name query (porta UDP 137) quando l'host e sullo stesso segmento di
+# rete. [System.Net.Dns] invece interroga SOLO il DNS: se manca il PTR, fallisce
+# anche quando "ping -a" mostra un nome. nbtstat -A replica quella stessa
+# interrogazione NetBIOS. Il processo esterno viene vincolato a un timeout
+# esplicito (Process.WaitForExit), coerente con l'approccio usato per il DNS:
+# nbtstat non ha un timeout nativo e su un host fuori subnet puo attendere a
+# lungo prima di arrendersi da solo.
+function Resolve-HcNetBiosName {
+    param([Parameter(Mandatory)][string]$IpAddress)
+
+    $timeoutMs = [int]$script:Config.Queues.NetBiosTimeoutMs
+    if ($timeoutMs -le 0) { $timeoutMs = 1500 }
+
+    $process = $null
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = 'nbtstat.exe'
+        $psi.Arguments              = '-A {0}' -f $IpAddress
+        $psi.RedirectStandardOutput = $true
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+
+        $process = [System.Diagnostics.Process]::Start($psi)
+        if (-not $process.WaitForExit($timeoutMs)) {
+            try { $process.Kill() } catch { }
+            Write-HcLog ('nbtstat su {0} oltre il timeout di {1} ms.' -f $IpAddress, $timeoutMs) -Level DEBUG
+            return $null
+        }
+
+        $output = $process.StandardOutput.ReadToEnd()
+        # Riga tipica: "SERVERNAME     <00>  UNIQUE      Registered"
+        $match = [regex]::Match($output, '^\s*([A-Za-z0-9_\-]+)\s*<00>\s*UNIQUE', 'Multiline')
+        if ($match.Success) { return $match.Groups[1].Value.Trim() }
+        return $null
+    }
+    catch {
+        Write-HcLog ('nbtstat su {0} non eseguibile: {1}' -f $IpAddress, $_.Exception.Message) -Level DEBUG
+        return $null
+    }
+    finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
 # NextHopDomain a volte e un IP invece di un nome: tipico di uno smart host o di
-# un send connector configurato con l'indirizzo anziche l'FQDN. Se e un IP e la
-# risoluzione PTR restituisce un nome, lo si affianca senza nascondere l'IP.
-# Se non e un IP (dominio SMTP o nome di un database) resta invariato.
+# un send connector configurato con l'indirizzo anziche l'FQDN. Se e un IP,
+# prima si tenta il DNS (PTR) e poi, se non risolve, il NetBIOS: cosi il
+# risultato si avvicina a quanto mostrerebbe "ping -a" sulla stessa rete. Il
+# nome viene affiancato senza mai nascondere l'IP. Se non e un IP (dominio SMTP
+# o nome di un database) resta invariato.
 function Get-HcNextHopLabel {
     param([string]$NextHopDomain)
 
@@ -1462,7 +1515,53 @@ function Get-HcNextHopLabel {
     if (-not [System.Net.IPAddress]::TryParse($candidate, [ref]$parsedIp)) { return $NextHopDomain }
 
     $hostName = Resolve-HcReverseDns -IpAddress $candidate
+    if (-not $hostName -and $script:Config.Queues.TryNetBiosFallback) {
+        $hostName = Resolve-HcNetBiosName -IpAddress $candidate
+    }
     if ($hostName) { return '{0} [{1}]' -f $NextHopDomain, $hostName }
+    return $NextHopDomain
+}
+
+# Get-Queue espone gia il GUID del send connector usato per quell'hop
+# (NextHopConnector): non serve indovinarlo dal dominio o dagli AddressSpaces.
+# Per una coda di consegna interna (via DAG/database) quel GUID non corrisponde
+# a nessun Send Connector: Get-SendConnector fallisce, e in quel caso non si
+# mostra nulla in piu, invece di inventare un nome. Cache per GUID: lo stesso
+# connector serve piu code sullo stesso server.
+function Get-HcSendConnectorName {
+    param([string]$ConnectorId)
+
+    if ([string]::IsNullOrWhiteSpace($ConnectorId)) { return $null }
+    if (-not $script:Config.Queues.ResolveSendConnectorName) { return $null }
+    if (-not (Test-HcCommand 'Get-SendConnector')) { return $null }
+
+    if (-not $script:SendConnectorCache) { $script:SendConnectorCache = @{} }
+    if ($script:SendConnectorCache.ContainsKey($ConnectorId)) { return $script:SendConnectorCache[$ConnectorId] }
+
+    $name = $null
+    try {
+        $connector = Get-SendConnector -Identity $ConnectorId -ErrorAction Stop
+        if ($connector) { $name = [string]$connector.Name }
+    }
+    catch {
+        Write-HcLog ('NextHopConnector {0} non corrisponde a un send connector (probabile consegna interna): {1}' -f $ConnectorId, $_.Exception.Message) -Level DEBUG
+    }
+
+    $script:SendConnectorCache[$ConnectorId] = $name
+    return $name
+}
+
+# Etichetta completa di una coda: destinazione (con hostname risolto se e un IP)
+# piu, se disponibile, il send connector che la sta instradando.
+function Get-HcQueueDestinationLabel {
+    param([Parameter(Mandatory)][object]$Queue)
+
+    $label = Get-HcNextHopLabel -NextHopDomain ([string]$Queue.NextHopDomain)
+
+    $connectorName = Get-HcSendConnectorName -ConnectorId ([string]$Queue.NextHopConnector)
+    if ($connectorName) { $label = '{0} via connector "{1}"' -f $label, $connectorName }
+
+    return $label
     return $NextHopDomain
 }
 
@@ -1510,7 +1609,7 @@ function Invoke-HcQueueCheck {
         Poison       = if ($poisonQueue)     { [int64]($poisonQueue     | Measure-Object -Property MessageCount -Sum).Sum } else { 0 }
         RetryCount   = $retryQueues.Count
         ShadowTotal  = $shadowTotal
-        LargestName  = if ($largest) { Get-HcNextHopLabel -NextHopDomain ([string]$largest.NextHopDomain) } else { '' }
+        LargestName  = if ($largest) { Get-HcQueueDestinationLabel -Queue $largest } else { '' }
         LargestCount = if ($largest) { [int64]$largest.MessageCount } else { 0 }
         Severity     = $sev
     }) | Out-Null
@@ -1552,7 +1651,7 @@ function Invoke-HcQueueCheck {
             # Item resta l'IP/dominio grezzo: e la chiave di deduplica degli alert e
             # non deve dipendere da una risoluzione DNS che puo cambiare da un giro
             # all'altro. Solo il messaggio, destinato a un umano, mostra l'hostname.
-            $destination = Get-HcNextHopLabel -NextHopDomain ([string]$q.NextHopDomain)
+            $destination = Get-HcQueueDestinationLabel -Queue $q
             Add-Finding -Category 'Queue' -Server $Target.Name -Item ([string]$q.NextHopDomain) -Severity $qSev `
                 -Message ('Coda "{0}" verso {1}: {2} messaggi, stato {3}{4}.' -f $identity, $destination, $count, $status, $(if ($q.LastError) { ' - ' + $q.LastError } else { '' })) `
                 -Value $count
@@ -1886,7 +1985,7 @@ function Write-HcQueueSummaryConsole {
 
     Write-Host ("`nCode di trasporto - {0} messaggi su {1} server" -f $grandTotal, $QueueSummary.Count) -ForegroundColor White
     $header = '{0,-20} {1,9} {2,6} {3,10} {4,7} {5,7} {6,-26} {7,8}' -f `
-        'Server', 'In coda', 'Code', 'Submiss.', 'Retry', 'Poison', 'Coda maggiore', 'Shadow'
+        'Server', 'In coda', 'Code', 'Submiss.', 'Retry', 'Poison', 'NextHopDomain', 'Shadow'
     Write-Host $header -ForegroundColor Gray
     Write-Host ('-' * $header.Length) -ForegroundColor Gray
 
@@ -1976,7 +2075,7 @@ function New-HcMailBody {
             "<th style='border:1px solid #dfe4e6;'>Submission</th>" +
             "<th style='border:1px solid #dfe4e6;'>In retry</th>" +
             "<th style='border:1px solid #dfe4e6;'>Poison</th>" +
-            "<th style='border:1px solid #dfe4e6;'>Coda maggiore</th>" +
+            "<th style='border:1px solid #dfe4e6;'>NextHopDomain</th>" +
             "<th style='border:1px solid #dfe4e6;'>Shadow</th></tr>")
 
         foreach ($row in ($queues | Sort-Object { [int64]$_.Total } -Descending)) {
