@@ -9,10 +9,20 @@ ExchangeHealthCheck\
 ├── ExchangeHealthCheck.config.example.json  # template di configurazione
 ├── ExchangeHealthCheck.config.json          # la TUA configurazione (non versionata)
 ├── Install-ExchangeHealthCheckTask.ps1 # registra l'attivita pianificata
+├── GUIDE.md                             # guida utente (sorgente del PDF)
+├── ExchangeHealthCheck-Guide.pdf         # stessa guida, in formato documento
+├── Build-Guide.py                       # rigenera il PDF da GUIDE.md
+├── HANDOFF.md                           # note tecniche per chi riprende il progetto
 ├── Logs\                               # log giornalieri (creata al primo run)
 ├── Reports\                            # CSV di ogni esecuzione
 └── State\alert-state.json              # stato degli alert tra un run e l'altro
 ```
+
+`GUIDE.md`/`ExchangeHealthCheck-Guide.pdf` sono pensati per chi preferisce un
+documento a un repository; `HANDOFF.md` è per chi riprende lo sviluppo dello
+script (architettura, scelte di design, cronologia dei bug trovati con causa e
+fix). Tutti e tre vanno aggiornati insieme al codice, non sono generati
+automaticamente dai commit.
 
 ## Cosa controlla
 

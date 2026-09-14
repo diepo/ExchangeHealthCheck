@@ -48,11 +48,12 @@ Repository: https://github.com/diepo/ExchangeHealthCheck
    Il file `ExchangeHealthCheck.config.json` contiene dati del tuo ambiente
    (nomi server, indirizzi mail) e non va mai condiviso o versionato.
 
-3. Apri il file e imposta almeno:
-   - `Organization.ViewEntireForest`: `false` se la tua organizzazione
-     Exchange vive in un solo dominio (caso più comune)
-   - `Servers.Include`: i server da controllare (o `["*"]` per tutti)
-   - `Mail.SmtpServers`, `Mail.From`, `Mail.To`
+3. Apri il file e imposta almeno le chiavi seguenti:
+
+- `Organization.ViewEntireForest`: `false` se la tua organizzazione Exchange
+  vive in un solo dominio (caso più comune)
+- `Servers.Include`: i server da controllare (o `["*"]` per tutti)
+- `Mail.SmtpServers`, `Mail.From`, `Mail.To`
 
 ## 4. Primo test, passo per passo
 
@@ -80,8 +81,13 @@ attiverai davvero la mail.
 Ogni esecuzione produce un CSV in `Reports\`:
 
 ```powershell
-Import-Csv (Get-ChildItem .\Reports\*.csv | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName |
-    Where-Object Severity -ne 'OK' | Format-Table Severity, Server, Category, Message -AutoSize
+$ultimo = Get-ChildItem .\Reports\*.csv |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+Import-Csv $ultimo.FullName |
+    Where-Object Severity -ne 'OK' |
+    Format-Table Severity, Server, Category, Message -AutoSize
 ```
 
 Usa questo passaggio per tarare le soglie e popolare `Ignore.*` prima di
@@ -124,7 +130,8 @@ notificata: il giro successivo riprova, non resta in silenzio per il cooldown.
 ## 6. Programmazione automatica
 
 ```powershell
-.\Install-ExchangeHealthCheckTask.ps1 -IntervalMinutes 15 -UserName 'DOMINIO\account-servizio'
+.\Install-ExchangeHealthCheckTask.ps1 `
+    -IntervalMinutes 15 -UserName 'DOMINIO\account-servizio'
 ```
 
 Registra un'attività pianificata che parte all'avvio del server e si ripete
