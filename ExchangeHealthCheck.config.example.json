@@ -63,6 +63,8 @@
     "CertExpiryDaysWarning": 30,
     "CertExpiryDaysCritical": 7,
 
+    "QueueSubjectThreshold": 200,
+
     "ThrottleLimit": 24,
     "RemoteOpenTimeoutSeconds": 20,
     "RemoteOperationTimeoutSeconds": 120
@@ -162,10 +164,12 @@
     "Cc": [],
     "SubjectPrefix": "[Exchange Health]",
     "AttachCsv": true,
-    "IncludeQueueSummary": true
+    "IncludeQueueSummary": true,
+    "QueueAlertSubjectTag": "ATTENZIONE CODE"
   },
 
   "Console": {
+    "ShowCategorySummary": true,
     "ShowQueueSummary": true
   },
 

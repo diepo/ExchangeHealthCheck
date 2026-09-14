@@ -137,6 +137,8 @@ $DefaultConfigJson = @'
     "BackupAgeHoursCritical": 72,
     "CertExpiryDaysWarning": 30,
     "CertExpiryDaysCritical": 7,
+
+    "QueueSubjectThreshold": 200,
     "ThrottleLimit": 24,
     "RemoteOpenTimeoutSeconds": 20,
     "RemoteOperationTimeoutSeconds": 120
@@ -182,9 +184,11 @@ $DefaultConfigJson = @'
     "Cc": [],
     "SubjectPrefix": "[Exchange Health]",
     "AttachCsv": true,
-    "IncludeQueueSummary": true
+    "IncludeQueueSummary": true,
+    "QueueAlertSubjectTag": "ATTENZIONE CODE"
   },
   "Console": {
+    "ShowCategorySummary": true,
     "ShowQueueSummary": true
   },
   "Paths": {
@@ -1941,6 +1945,89 @@ function Get-HcSeverityColor {
     }
 }
 
+# Vista aggregata "per categoria": risponde a "cosa non va nell'ambiente",
+# complementare al riepilogo "per server" (che risponde a "chi sta male").
+# Serve a leggere lo stato dell'infrastruttura a colpo d'occhio senza dover
+# scorrere server per server: quante categorie hanno problemi e di che entita.
+function Get-HcCategorySummary {
+    param([object[]]$Findings)
+
+    $rows = foreach ($group in ($Findings | Group-Object Category)) {
+        $counts = @{
+            Critical = @($group.Group | Where-Object Severity -eq 'Critical').Count
+            Warning  = @($group.Group | Where-Object Severity -eq 'Warning').Count
+            Unknown  = @($group.Group | Where-Object Severity -eq 'Unknown').Count
+            Info     = @($group.Group | Where-Object Severity -eq 'Info').Count
+            OK       = @($group.Group | Where-Object Severity -eq 'OK').Count
+        }
+        $topSeverity = 'OK'
+        foreach ($sev in @('Critical', 'Unknown', 'Warning', 'Info')) {
+            if ($counts[$sev] -gt 0) { $topSeverity = $sev; break }
+        }
+        [pscustomobject]@{
+            Category    = $group.Name
+            Critical    = $counts.Critical
+            Warning     = $counts.Warning
+            Unknown     = $counts.Unknown
+            Info        = $counts.Info
+            OK          = $counts.OK
+            TopSeverity = $topSeverity
+        }
+    }
+
+    return @($rows | Sort-Object @{Expression = { Get-SeverityRank $_.TopSeverity }; Descending = $true},
+                                  @{Expression = { $_.Critical }; Descending = $true},
+                                  Category)
+}
+
+function Write-HcCategorySummaryConsole {
+    param([object[]]$Findings)
+
+    $rows = Get-HcCategorySummary -Findings $Findings
+    if ($rows.Count -eq 0) { return }
+
+    Write-Host "`nStato per categoria (l'intero ambiente, non un singolo server)" -ForegroundColor White
+    $header = '{0,-22} {1,9} {2,8} {3,8} {4,6}' -f 'Categoria', 'Critical', 'Warning', 'Unknown', 'Info'
+    Write-Host $header -ForegroundColor Gray
+    Write-Host ('-' * $header.Length) -ForegroundColor Gray
+
+    foreach ($row in $rows) {
+        $line = '{0,-22} {1,9} {2,8} {3,8} {4,6}' -f $row.Category, $row.Critical, $row.Warning, $row.Unknown, $row.Info
+        Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.TopSeverity)
+    }
+    Write-Host ""
+}
+
+function New-HcCategorySummaryTable {
+    param([object[]]$Findings)
+
+    $rows = Get-HcCategorySummary -Findings $Findings
+    if ($rows.Count -eq 0) { return '' }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:18px 0 6px 0;'>Stato per categoria</h3>")
+    [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
+    [void]$sb.AppendLine("<tr style='background:#f4f6f7;color:#2c3e50;text-align:left;'>" +
+        "<th style='border:1px solid #dfe4e6;'>Categoria</th>" +
+        "<th style='border:1px solid #dfe4e6;text-align:center;'>Critical</th>" +
+        "<th style='border:1px solid #dfe4e6;text-align:center;'>Warning</th>" +
+        "<th style='border:1px solid #dfe4e6;text-align:center;'>Unknown</th>" +
+        "<th style='border:1px solid #dfe4e6;text-align:center;'>Info</th></tr>")
+
+    foreach ($row in $rows) {
+        $color = Get-HcSeverityColor $row.TopSeverity
+        $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;border-left:4px solid {0};'>{1}</td>" +
+            "<td style='border:1px solid #dfe4e6;text-align:center;'>{2}</td>" +
+            "<td style='border:1px solid #dfe4e6;text-align:center;'>{3}</td>" +
+            "<td style='border:1px solid #dfe4e6;text-align:center;'>{4}</td>" +
+            "<td style='border:1px solid #dfe4e6;text-align:center;'>{5}</td></tr>"
+        $html = $template -f $color, (ConvertTo-HcHtmlText $row.Category), $row.Critical, $row.Warning, $row.Unknown, $row.Info
+        [void]$sb.AppendLine($html)
+    }
+    [void]$sb.AppendLine('</table>')
+    return $sb.ToString()
+}
+
 function New-HcFindingTable {
     param([string]$Title, [object[]]$Rows, [string]$Accent = '#34495e')
 
@@ -2041,6 +2128,11 @@ function New-HcMailBody {
         [void]$sb.AppendLine("<td style='border:1px solid #dfe4e6;text-align:center;min-width:92px;'><div style='color:$color;font-size:22px;font-weight:700;'>$($counts[$sev])</div><div style='color:#7f8c8d;font-size:11px;text-transform:uppercase;'>$sev</div></td>")
     }
     [void]$sb.AppendLine("</tr></table>")
+
+    # Stato aggregato per categoria: risponde a "cosa non va" guardando l'intero
+    # ambiente, prima ancora del dettaglio server per server piu sotto. E il
+    # colpo d'occhio che deve bastare senza dover aprire ogni singola tabella.
+    [void]$sb.AppendLine((New-HcCategorySummaryTable -Findings $AllFindings))
 
     [void]$sb.AppendLine((New-HcFindingTable -Title 'Nuove anomalie' -Rows @($AlertResult.New) -Accent '#c0392b'))
     [void]$sb.AppendLine((New-HcFindingTable -Title 'Anomalie peggiorate' -Rows @($AlertResult.Escalated) -Accent '#c0392b'))
@@ -2340,6 +2432,10 @@ try {
     $warning  = @($allFindings | Where-Object { $_.Severity -in @('Warning','Unknown') })
     Write-HcLog ('Controlli completati: {0} finding ({1} critical, {2} warning/unknown).' -f $allFindings.Count, $critical.Count, $warning.Count)
 
+    if ($script:Config.Console.ShowCategorySummary) {
+        Write-HcCategorySummaryConsole -Findings $allFindings
+    }
+
     if ($script:Config.Console.ShowQueueSummary) {
         Write-HcQueueSummaryConsole -QueueSummary $script:QueueSummary.ToArray()
     }
@@ -2401,8 +2497,21 @@ try {
             $tag = 'OK'; $priority = 'Low'
         }
 
-        $subject = '{0} {1} - {2} - {3} critical / {4} warning' -f `
-            $script:Config.Mail.SubjectPrefix, $tag, $script:Config.Organization.Name, $critical.Count, $warning.Count
+        # Tag aggiuntivo, indipendente da CRITICO/WARNING: rende visibile in
+        # anteprima (senza aprire la mail) che le code sono congestionate ORA,
+        # a prescindere dal cooldown della notifica su quel singolo alert.
+        $queueTag = ''
+        $queueSubjectThreshold = [int64]$script:Config.Thresholds.QueueSubjectThreshold
+        if ($queueSubjectThreshold -le 0) { $queueSubjectThreshold = 200 }
+        $queueOverThreshold = @($script:QueueSummary.ToArray() | Where-Object { [int64]$_.Total -ge $queueSubjectThreshold })
+        if ($queueOverThreshold.Count -gt 0) {
+            $queueTagText = [string]$script:Config.Mail.QueueAlertSubjectTag
+            if (-not $queueTagText) { $queueTagText = 'ATTENZIONE CODE' }
+            $queueTag = ' - {0}' -f $queueTagText
+        }
+
+        $subject = '{0} {1}{2} - {3} - {4} critical / {5} warning' -f `
+            $script:Config.Mail.SubjectPrefix, $tag, $queueTag, $script:Config.Organization.Name, $critical.Count, $warning.Count
 
         $attachments = @()
         if ($script:Config.Mail.AttachCsv -and $csvPath) { $attachments += $csvPath }
