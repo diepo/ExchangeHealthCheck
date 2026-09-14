@@ -177,6 +177,9 @@ $DefaultConfigJson = @'
     "AttachCsv": true,
     "IncludeQueueSummary": true
   },
+  "Console": {
+    "ShowQueueSummary": true
+  },
   "Paths": {
     "LogDirectory": "Logs",
     "ReportDirectory": "Reports",
@@ -272,6 +275,19 @@ function Get-SeverityRank {
     }
 }
 
+# Colore console per severita, condiviso tra i finding e il riepilogo code: cosi
+# i due output restano visivamente coerenti (rosso = Critical, verde = OK, ...).
+function Get-HcConsoleColor {
+    param([string]$Severity)
+    switch ($Severity) {
+        'Critical' { 'Red' }
+        'Unknown'  { 'Magenta' }
+        'Warning'  { 'Yellow' }
+        'Info'     { 'Cyan' }
+        default    { 'Green' }
+    }
+}
+
 function Add-Finding {
     param(
         [Parameter(Mandatory)][string]$Category,
@@ -303,12 +319,12 @@ function Add-Finding {
 
     # Colore per severita: rosso i Critical, verde gli OK. I finding non allarmanti
     # restano a video solo con -Verbose, ma finiscono comunque nel file di log.
-    switch ($Severity) {
-        'Critical' { $color = 'Red';     $level = 'ERROR' }
-        'Unknown'  { $color = 'Magenta'; $level = 'WARN'  }
-        'Warning'  { $color = 'Yellow';  $level = 'WARN'  }
-        'Info'     { $color = 'Cyan';    $level = 'INFO'  }
-        default    { $color = 'Green';   $level = 'INFO'  }
+    $color = Get-HcConsoleColor $Severity
+    $level = switch ($Severity) {
+        'Critical' { 'ERROR' }
+        'Unknown'  { 'WARN'  }
+        'Warning'  { 'WARN'  }
+        default    { 'INFO'  }
     }
     $detailOnly = ((Get-SeverityRank $Severity) -lt 2)
     Write-HcLog ('{0,-8} {1,-22} {2,-18} {3}' -f $Severity.ToUpperInvariant(), $Category, $Server, $Message) `
@@ -1795,6 +1811,36 @@ function New-HcFindingTable {
     return $sb.ToString()
 }
 
+# Stessa vista aggregata della sezione "Code di trasporto" della mail, ma a
+# console: utile durante un giro a secco (-NoMail), dove la mail non parte e
+# altrimenti delle code si vedrebbe solo il singolo finding quando supera soglia,
+# non il quadro d'insieme del mail flow.
+function Write-HcQueueSummaryConsole {
+    param([object[]]$QueueSummary)
+
+    if (-not $QueueSummary -or $QueueSummary.Count -eq 0) { return }
+
+    $grandTotal = 0
+    foreach ($row in $QueueSummary) { $grandTotal += [int64]$row.Total }
+
+    Write-Host ("`nCode di trasporto - {0} messaggi su {1} server" -f $grandTotal, $QueueSummary.Count) -ForegroundColor White
+    $header = '{0,-20} {1,9} {2,6} {3,10} {4,7} {5,7} {6,-26} {7,8}' -f `
+        'Server', 'In coda', 'Code', 'Submiss.', 'Retry', 'Poison', 'Coda maggiore', 'Shadow'
+    Write-Host $header -ForegroundColor Gray
+    Write-Host ('-' * $header.Length) -ForegroundColor Gray
+
+    foreach ($row in ($QueueSummary | Sort-Object { [int64]$_.Total } -Descending)) {
+        $largest = '-'
+        if ($row.LargestName) { $largest = '{0} ({1})' -f $row.LargestName, $row.LargestCount }
+        if ($largest.Length -gt 26) { $largest = $largest.Substring(0, 23) + '...' }
+
+        $line = '{0,-20} {1,9} {2,6} {3,10} {4,7} {5,7} {6,-26} {7,8}' -f `
+            $row.Server, $row.Total, $row.QueueCount, $row.Submission, $row.RetryCount, $row.Poison, $largest, $row.ShadowTotal
+        Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.Severity)
+    }
+    Write-Host "(Shadow escluse dai totali: trattengono messaggi per progetto.)`n" -ForegroundColor DarkGray
+}
+
 function New-HcMailBody {
     param(
         [object]$AlertResult,
@@ -2133,6 +2179,10 @@ try {
     $critical = @($allFindings | Where-Object { $_.Severity -eq 'Critical' })
     $warning  = @($allFindings | Where-Object { $_.Severity -in @('Warning','Unknown') })
     Write-HcLog ('Controlli completati: {0} finding ({1} critical, {2} warning/unknown).' -f $allFindings.Count, $critical.Count, $warning.Count)
+
+    if ($script:Config.Console.ShowQueueSummary) {
+        Write-HcQueueSummaryConsole -QueueSummary $script:QueueSummary.ToArray()
+    }
 
     # --- Report su disco
     $stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'

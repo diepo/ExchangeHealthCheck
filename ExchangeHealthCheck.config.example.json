@@ -158,6 +158,10 @@
     "IncludeQueueSummary": true
   },
 
+  "Console": {
+    "ShowQueueSummary": true
+  },
+
   "Paths": {
     "LogDirectory": "Logs",
     "ReportDirectory": "Reports",
