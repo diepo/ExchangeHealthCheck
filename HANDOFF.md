@@ -195,15 +195,73 @@ maggiore" (`NextHopDomain` col conteggio più alto, escludendo submission e
 poison che non hanno un destinatario esterno significativo).
 
 **`NextHopDomain` può essere un IP** (smart host configurato per indirizzo
-anziché FQDN). `Get-HcNextHopLabel` prova una risoluzione PTR
-(`System.Net.Dns.BeginGetHostEntry` con timeout esplicito via
+anziché FQDN, o consegna diretta). `Get-HcNextHopLabel` prova una risoluzione
+PTR (`System.Net.Dns.BeginGetHostEntry` con timeout esplicito via
 `AsyncWaitHandle.WaitOne`, mai la forma sincrona bloccante) e, se risolve,
-affianca l'hostname tra parentesi quadre senza nascondere l'IP. Cache per IP a
-livello di sessione (la stessa destinazione ricorre su più code/server).
-**Importante**: la chiave di deduplica degli alert (`Item`) resta sempre l'IP
-grezzo — solo il messaggio testuale mostra l'hostname risolto, perché una
-risoluzione DNS può cambiare da un giro all'altro e non deve far perdere lo
-stato di un alert.
+affianca l'hostname tra parentesi quadre senza nascondere l'IP. Se il PTR non
+risponde, prova un **fallback NetBIOS** (`Resolve-HcNetBiosName`, `nbtstat -A`
+con lo stesso pattern di timeout esplicito e uccisione del processo): su reti
+dove le zone di reverse lookup DNS non sono tenute aggiornate, `ping -a` risolve
+comunque il nome perché il resolver di Windows prova anche NetBIOS — `System.Net.Dns`
+da solo no. Cache per IP a livello di sessione per entrambi i meccanismi (la
+stessa destinazione ricorre su più code/server). **Importante**: la chiave di
+deduplica degli alert (`Item`) resta sempre l'IP grezzo — solo il messaggio
+testuale mostra l'hostname risolto, perché una risoluzione DNS/NetBIOS può
+cambiare da un giro all'altro e non deve far perdere lo stato di un alert.
+
+`Get-Queue` espone già il GUID del send connector in uso per ogni coda
+(`NextHopConnector`): `Get-HcSendConnectorName` lo risolve con
+`Get-SendConnector -Identity <guid>` invece di indovinarlo dal dominio o dagli
+`AddressSpaces`. Per la consegna interna (via DAG/database, es. `NextHopDomain`
+= nome del DAG) quel GUID non corrisponde a un send connector reale: la
+ricerca fallisce con grazia e non si mostra nulla in più, invece di inventare
+un nome. L'etichetta finale è composta da `Get-HcQueueDestinationLabel`, che
+unisce risoluzione IP e nome del connector.
+
+### 3.10 Stato aggregato per categoria e mail dedicata alle novità
+
+Oltre al riepilogo "per server" (chi sta male), esiste un riepilogo **"per
+categoria"** (`Get-HcCategorySummary`, con rendering `New-HcCategorySummaryTable`
+per la mail e `Write-HcCategorySummaryConsole` per la console): quante cose
+sono Critical/Warning/Unknown/Info in ciascuna categoria (Disk, Service, Queue,
+Certificate, ...), ordinate per gravità. Risponde a "cosa non va
+nell'infrastruttura" a colpo d'occhio, senza dover scorrere ogni server. In
+mail è posizionato subito dopo i contatori aggregati, prima delle tabelle di
+dettaglio.
+
+**Due canali di notifica distinti, con scopi diversi**:
+
+1. **Mail di riepilogo** (`New-HcMailBody`, invariata nella sua logica di invio):
+   copre sempre tutto il quadro — nuove, peggiorate, promemoria, rientrate,
+   riepilogo per categoria e per server, code. È l'unica il cui esito
+   determina lo stato degli alert (§3.6).
+2. **Mail dedicata alle sole novità** (`Get-HcUrgentFindings` +
+   `New-HcUrgentAlertBody`), aggiunta su richiesta esplicita dell'utente:
+   parte in più, con oggetto distinto (default `WARNING FOUND`,
+   `Mail.SeparateAlertSubjectTag`) e corpo ridotto alle sole righe rilevanti.
+   Non scatta mai su un promemoria (anomalia già nota, in cooldown) — solo su
+   `$alerts.New` o `$alerts.Escalated` di `Resolve-HcAlert`. Regola di innesco,
+   decisa esplicitamente dall'utente per evitare rumore:
+   - qualunque categoria diversa da `Queue`: solo un nuovo `Critical` (o un
+     `Warning` che diventa `Critical`) la fa scattare;
+   - categoria `Queue`: si guarda il **valore numerico** del finding (messaggi
+     in coda), non la sua severità — una coda che passa da 15 a 18 non deve
+     generare nulla; serve superare `Thresholds.QueueSubjectThreshold` (default
+     200), a prescindere che sia già `Warning` o `Critical`.
+
+   Il suo esito (inviata o no) **non tocca lo stato degli alert**: la mail di
+   riepilogo resta l'unica fonte di verità per il cooldown, così un fallimento
+   di questo canale aggiuntivo non altera la logica anti-mail-storm già
+   verificata in §3.6.
+
+**Oggetto della mail di riepilogo**: guadagna un tag aggiuntivo, indipendente
+da CRITICO/WARNING, quando il totale in coda di un qualunque server raggiunge
+`Thresholds.QueueSubjectThreshold` (la stessa soglia usata sopra): default
+`ATTENZIONE CODE` (`Mail.QueueAlertSubjectTag`). Calcolato sulla fotografia
+corrente delle code (`$script:QueueSummary`), non sul solo insieme delle
+notifiche di questo giro: resta visibile anche se quella coda è già nota e in
+cooldown — a differenza della mail dedicata alle novità, che invece su una
+coda già nota non scatterebbe.
 
 ## 4. Schema di configurazione (riferimento completo)
 
@@ -214,15 +272,15 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `Organization` | Nome, server a cui connettersi (`ConnectTo`, usato solo se non si è già in Exchange Management Shell), `ViewEntireForest`, rilevamento/override del domain controller |
 | `Servers` | Perimetro (`Include`/`Exclude`/`SiteFilter`/`IncludeEdge`), `UseFqdnForRemoting`, `SkipExchangeChecksWhenOffline` |
 | `Checks` | Un booleano per famiglia di controllo (Os, Disk, Services, Components, Health, Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi) |
-| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code, copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete |
+| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code, copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità) |
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet` |
-| `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs` |
-| `Console` | `ShowQueueSummary` |
+| `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
+| `Console` | `ShowCategorySummary`, `ShowQueueSummary` |
 | `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets, Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
 | `ExtraServices` | Servizi non-Exchange da includere nel check Services (es. W3SVC, WinRM) |
 | `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare |
-| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code |
+| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10) |
 | `Paths` | Cartelle di log/report/stato, retention |
 
 ## 5. Bug reali trovati durante il test su ambiente vero — con causa e fix

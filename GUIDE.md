@@ -127,6 +127,30 @@ Lo stato di ogni anomalia è persistito in `State\alert-state.json` con chiave
 Se l'invio della mail fallisce, l'anomalia **non** viene marcata come
 notificata: il giro successivo riprova, non resta in silenzio per il cooldown.
 
+**Colpo d'occhio sull'ambiente.** La mail (e la console, durante un giro a
+secco) apre con un riepilogo **per categoria** (Disk, Service, Queue,
+Certificate, ...): quante cose sono Critical/Warning in ciascuna, prima ancora
+del dettaglio server per server. Risponde a "cosa non va nell'infrastruttura"
+senza dover aprire ogni tabella.
+
+**Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
+categorie, server, dettaglio), quando in un giro compare qualcosa di davvero
+nuovo o peggiorato ne parte una seconda, minimale, con oggetto **"WARNING
+FOUND"** e solo le righe rilevanti — pensata per essere letta in pochi secondi.
+Scatta solo su:
+
+- un **nuovo Critical** in qualunque categoria (o un Warning che diventa
+  Critical);
+- una **coda** che raggiunge `Thresholds.QueueSubjectThreshold` (default 200
+  messaggi), a prescindere dalla sua severità.
+
+Non scatta mai su un promemoria di un'anomalia già nota: una coda che oscilla
+di poco (es. 15→18 messaggi) non genera questa mail.
+
+**Oggetto con tag dedicato per le code.** Se una qualunque coda raggiunge quella
+stessa soglia di 200 messaggi, l'oggetto della mail di riepilogo guadagna il
+tag "ATTENZIONE CODE", visibile senza aprire il messaggio.
+
 ## 6. Programmazione automatica
 
 ```powershell
