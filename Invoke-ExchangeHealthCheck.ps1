@@ -1953,13 +1953,20 @@ function Get-HcSeverityColor {
 function Get-HcCategorySummary {
     param([object[]]$Findings)
 
+    # Conta le occorrenze DISTINTE (stesso Item + stesso testo del messaggio),
+    # non ogni singolo finding. Lo stesso health set Unhealthy, la stessa causa
+    # di un witness irraggiungibile, lo stesso certificato in scadenza spesso
+    # vengono rilevati IDENTICI su piu server dello stesso DAG: sommarli uno per
+    # server gonfia il numero (25) senza indicare 25 problemi reali (magari solo
+    # 3, ciascuno visto da piu server). Item da solo non basta come chiave: due
+    # dischi "C:" pieni su server diversi condividono l'etichetta ma sono due
+    # problemi realmente distinti, e li distingue solo il testo del messaggio
+    # (GB liberi reali diversi) - per questo la deduplica e su Item+Message
+    # insieme, non sul solo Item.
     $rows = foreach ($group in ($Findings | Group-Object Category)) {
-        $counts = @{
-            Critical = @($group.Group | Where-Object Severity -eq 'Critical').Count
-            Warning  = @($group.Group | Where-Object Severity -eq 'Warning').Count
-            Unknown  = @($group.Group | Where-Object Severity -eq 'Unknown').Count
-            Info     = @($group.Group | Where-Object Severity -eq 'Info').Count
-            OK       = @($group.Group | Where-Object Severity -eq 'OK').Count
+        $counts = @{}
+        foreach ($sev in @('Critical', 'Warning', 'Unknown', 'Info', 'OK')) {
+            $counts[$sev] = @($group.Group | Where-Object Severity -eq $sev | Group-Object Item, Message).Count
         }
         $topSeverity = 'OK'
         foreach ($sev in @('Critical', 'Unknown', 'Warning', 'Info')) {
