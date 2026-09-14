@@ -1,0 +1,3 @@
+# Il PDF e' binario: mai passarlo per la normalizzazione LF/CRLF di git,
+# altrimenti si rischia di corromperlo silenziosamente ad ogni commit.
+*.pdf binary
