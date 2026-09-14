@@ -1978,7 +1978,17 @@ function Send-HcMail {
             return $true
         }
         catch {
-            Write-HcLog ('Invio via {0} fallito: {1}' -f $smtpHost, $_.Exception.Message) -Level WARN
+            # SmtpClient incapsula la causa vera: il messaggio esterno e quasi sempre
+            # un generico "Failure sending mail", mentre "No such host is known",
+            # "Unable to connect" o la risposta 5.7.x del server stanno nelle
+            # eccezioni interne. Si risale tutta la catena.
+            $reasons = @()
+            $current = $_.Exception
+            while ($current) {
+                if ($current.Message -and ($reasons -notcontains $current.Message)) { $reasons += $current.Message }
+                $current = $current.InnerException
+            }
+            Write-HcLog ('Invio via {0}:{1} fallito: {2}' -f $smtpHost, $mailCfg.Port, ($reasons -join ' -> ')) -Level WARN
         }
         finally {
             if ($message) { $message.Dispose() }
@@ -2024,9 +2034,29 @@ try {
 
     # --- Mail di test
     if ($TestMail) {
-        $ok = Send-HcMail -Subject ('{0} Test configurazione SMTP' -f $script:Config.Mail.SubjectPrefix) `
-            -Body '<p style="font-family:Segoe UI,Arial">Se ricevi questo messaggio, la configurazione SMTP dello script di health check Exchange e corretta.</p>'
-        if ($ok) { Write-HcLog 'Test mail completato con successo.' } else { Write-HcLog 'Test mail fallito.' -Level ERROR }
+        $mailCfg = $script:Config.Mail
+        if (-not $mailCfg.Enabled) {
+            Write-HcLog 'Test mail non eseguibile: Mail.Enabled e false nella configurazione. Impostalo a true e rilancia.' -Level ERROR
+            return
+        }
+
+        Write-HcLog ('Test mail -> server {0} porta {1} | SSL {2} | autenticazione {3} | da {4} | a {5}' -f `
+            (@($mailCfg.SmtpServers) -join ', '), $mailCfg.Port, [bool]$mailCfg.UseSsl,
+            $(if ($mailCfg.CredentialFile) { 'CredentialFile' } elseif ($mailCfg.UseDefaultCredentials) { 'account corrente' } else { 'anonima' }),
+            $mailCfg.From, (@($mailCfg.To) -join ', '))
+
+        $body = "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:13px;'>" +
+                "<p>Se ricevi questo messaggio, la configurazione SMTP dello health check Exchange funziona.</p>" +
+                "<table cellpadding='4' style='border-collapse:collapse;font-size:12px;color:#555;'>" +
+                "<tr><td>Inviato da</td><td><b>$env:COMPUTERNAME</b></td></tr>" +
+                "<tr><td>Account</td><td>$env:USERDOMAIN\$env:USERNAME</td></tr>" +
+                "<tr><td>Server SMTP configurati</td><td>$(ConvertTo-HcHtmlText (@($mailCfg.SmtpServers) -join ', '))</td></tr>" +
+                "<tr><td>Porta / SSL</td><td>$($mailCfg.Port) / $([bool]$mailCfg.UseSsl)</td></tr>" +
+                "<tr><td>Orario</td><td>$(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')</td></tr></table></div>"
+
+        $ok = Send-HcMail -Subject ('{0} Test configurazione SMTP' -f $mailCfg.SubjectPrefix) -Body $body
+        if ($ok) { Write-HcLog 'Test mail: messaggio accettato dal server SMTP. Verifica la ricezione nella casella di destinazione.' }
+        else { Write-HcLog 'Test mail fallito: vedi il motivo nelle righe "Invio via ..." qui sopra.' -Level ERROR }
         return
     }
 
