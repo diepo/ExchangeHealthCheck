@@ -105,6 +105,10 @@
     "IncludeFailingMonitors": true,
     "MaxMonitorsPerHealthSet": 5
   },
+  "Queues": {
+    "ResolveNextHopHostnames": true,
+    "ReverseDnsTimeoutMs": 1000
+  },
   "Ignore": {
     "Services": [
       "MSExchangePOP3",

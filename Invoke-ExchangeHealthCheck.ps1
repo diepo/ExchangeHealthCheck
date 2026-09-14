@@ -146,6 +146,10 @@ $DefaultConfigJson = @'
     "IncludeFailingMonitors": true,
     "MaxMonitorsPerHealthSet": 5
   },
+  "Queues": {
+    "ResolveNextHopHostnames": true,
+    "ReverseDnsTimeoutMs": 1000
+  },
   "Ignore": {
     "Services": ["MSExchangePOP3", "MSExchangePOP3BE", "MSExchangeIMAP4", "MSExchangeIMAP4BE", "MSExchangeEdgeSync"],
     "ServerComponents": ["ForwardSyncDaemon", "ProvisioningRps"],
@@ -1409,6 +1413,59 @@ function Invoke-HcDatabaseCheck {
 
 #region ----------------------------------------------------------- CHECK QUEUE
 
+# Risoluzione PTR con cache (per IP, per l'intera esecuzione) e timeout: senza un
+# timeout esplicito una risoluzione DNS che non risponde puo restare appesa a
+# lungo, e per un giro con decine di server con code verso decine di smart host
+# significherebbe rallentare l'intero check per un singolo DNS lento o assente.
+function Resolve-HcReverseDns {
+    param([Parameter(Mandatory)][string]$IpAddress)
+
+    if (-not $script:ReverseDnsCache) { $script:ReverseDnsCache = @{} }
+    if ($script:ReverseDnsCache.ContainsKey($IpAddress)) { return $script:ReverseDnsCache[$IpAddress] }
+
+    $timeoutMs = [int]$script:Config.Queues.ReverseDnsTimeoutMs
+    if ($timeoutMs -le 0) { $timeoutMs = 1000 }
+
+    $resolved = $null
+    try {
+        $async = [System.Net.Dns]::BeginGetHostEntry($IpAddress, $null, $null)
+        if ($async.AsyncWaitHandle.WaitOne($timeoutMs)) {
+            $resolved = [System.Net.Dns]::EndGetHostEntry($async).HostName
+        }
+        else {
+            Write-HcLog ('Risoluzione PTR di {0} oltre il timeout di {1} ms: resta il solo IP.' -f $IpAddress, $timeoutMs) -Level DEBUG
+        }
+    }
+    catch {
+        Write-HcLog ('Risoluzione PTR di {0} fallita: {1}' -f $IpAddress, $_.Exception.Message) -Level DEBUG
+    }
+
+    $script:ReverseDnsCache[$IpAddress] = $resolved
+    return $resolved
+}
+
+# NextHopDomain a volte e un IP invece di un nome: tipico di uno smart host o di
+# un send connector configurato con l'indirizzo anziche l'FQDN. Se e un IP e la
+# risoluzione PTR restituisce un nome, lo si affianca senza nascondere l'IP.
+# Se non e un IP (dominio SMTP o nome di un database) resta invariato.
+function Get-HcNextHopLabel {
+    param([string]$NextHopDomain)
+
+    if ([string]::IsNullOrWhiteSpace($NextHopDomain)) { return $NextHopDomain }
+    if (-not $script:Config.Queues.ResolveNextHopHostnames) { return $NextHopDomain }
+
+    $candidate = $NextHopDomain
+    # Alcuni next hop sono "IP:porta": si isola la sola parte IP per il parsing.
+    if ($candidate -match '^(\d{1,3}(?:\.\d{1,3}){3}):\d+$') { $candidate = $Matches[1] }
+
+    $parsedIp = $null
+    if (-not [System.Net.IPAddress]::TryParse($candidate, [ref]$parsedIp)) { return $NextHopDomain }
+
+    $hostName = Resolve-HcReverseDns -IpAddress $candidate
+    if ($hostName) { return '{0} [{1}]' -f $NextHopDomain, $hostName }
+    return $NextHopDomain
+}
+
 function Invoke-HcQueueCheck {
     param([object]$Target)
 
@@ -1453,7 +1510,7 @@ function Invoke-HcQueueCheck {
         Poison       = if ($poisonQueue)     { [int64]($poisonQueue     | Measure-Object -Property MessageCount -Sum).Sum } else { 0 }
         RetryCount   = $retryQueues.Count
         ShadowTotal  = $shadowTotal
-        LargestName  = if ($largest) { [string]$largest.NextHopDomain } else { '' }
+        LargestName  = if ($largest) { Get-HcNextHopLabel -NextHopDomain ([string]$largest.NextHopDomain) } else { '' }
         LargestCount = if ($largest) { [int64]$largest.MessageCount } else { 0 }
         Severity     = $sev
     }) | Out-Null
@@ -1492,8 +1549,12 @@ function Invoke-HcQueueCheck {
         }
 
         if ($qSev -ne 'OK') {
+            # Item resta l'IP/dominio grezzo: e la chiave di deduplica degli alert e
+            # non deve dipendere da una risoluzione DNS che puo cambiare da un giro
+            # all'altro. Solo il messaggio, destinato a un umano, mostra l'hostname.
+            $destination = Get-HcNextHopLabel -NextHopDomain ([string]$q.NextHopDomain)
             Add-Finding -Category 'Queue' -Server $Target.Name -Item ([string]$q.NextHopDomain) -Severity $qSev `
-                -Message ('Coda "{0}" verso {1}: {2} messaggi, stato {3}{4}.' -f $identity, $q.NextHopDomain, $count, $status, $(if ($q.LastError) { ' - ' + $q.LastError } else { '' })) `
+                -Message ('Coda "{0}" verso {1}: {2} messaggi, stato {3}{4}.' -f $identity, $destination, $count, $status, $(if ($q.LastError) { ' - ' + $q.LastError } else { '' })) `
                 -Value $count
         }
     }
