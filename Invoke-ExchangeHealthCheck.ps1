@@ -318,7 +318,15 @@ function Add-Finding {
         }
     }
     $finding = [pscustomobject]@{
-        Timestamp = Get-Date
+        # Cast esplicito, non solo "Get-Date": chiamato direttamente dentro un
+        # literal @{} o assegnato a una proprieta esistente, Get-Date produce un
+        # oggetto che ConvertTo-Json (Windows PowerShell 5.1) serializza come
+        # {value, DisplayHint, DateTime} invece di una data semplice; risultato,
+        # un cast [datetime] successivo su quel valore fallisce con "Cannot
+        # convert value ... DisplayHint ... to type System.DateTime". Passare
+        # prima da una variabile o (come qui) da un cast esplicito evita il
+        # problema alla radice.
+        Timestamp = [datetime](Get-Date)
         Category  = $Category
         Server    = $Server
         Item      = $Item
@@ -679,7 +687,7 @@ function Get-HcRemoteData {
             Volumes         = $volumes
             Services        = $services
             RebootPending   = $rebootPending
-            LocalTime       = Get-Date
+            LocalTime       = [datetime](Get-Date)
         }
     }
 
@@ -2537,10 +2545,18 @@ try {
     $sendRecovery = ([bool]$script:Config.Alerting.SendRecovery -and $recovered.Count -gt 0)
     $shouldSend   = ($toNotify.Count -gt 0) -or $sendRecovery -or $needHeartbeat -or $ForceMail
 
+    # Cast esplicito su LastRun: Get-Date chiamato direttamente dentro un
+    # literal @{} (a differenza di una variabile assegnata prima e poi
+    # referenziata) produce, sotto Windows PowerShell 5.1, un oggetto che
+    # ConvertTo-Json serializza come {value, DisplayHint, DateTime} invece di
+    # una data semplice. Al giro successivo Get-HcState lo rilegge cosi
+    # com'e, e un cast [datetime] su quel valore fallisce con "Cannot convert
+    # value ... DisplayHint ... to type System.DateTime" - il problema segnalato
+    # dall'utente, riprodotto e confermato con un test end-to-end multi-giro.
     $nextState = [pscustomobject]@{
         Alerts        = $alerts.NextAlerts
         LastHeartbeat = $state.LastHeartbeat
-        LastRun       = Get-Date
+        LastRun       = [datetime](Get-Date)
     }
 
     $mailSent = $false
@@ -2611,7 +2627,10 @@ try {
             }
         }
         elseif ($needHeartbeat) {
-            $nextState.LastHeartbeat = Get-Date
+            # Stesso motivo del cast su LastRun poco sopra: l'assegnazione
+            # diretta di Get-Date a una proprieta esistente ha lo stesso
+            # difetto quanto usarlo dentro un literal @{}.
+            $nextState.LastHeartbeat = [datetime](Get-Date)
         }
 
         # --- Mail dedicata alle sole novita (separata dal riepilogo appena inviato)
