@@ -316,6 +316,7 @@ pubblico, cronologici.
 | 9 | Due certificati pubblici con lo stesso nome, uno scaduto, causa probabile di `Transport.ServerCertMismatch` | I connector referenziano il certificato per `TlsCertificateName` (`<I>Issuer<S>Subject`), non per thumbprint: due certificati con stesso Subject e Issuer sono indistinguibili per Exchange, che può agganciare quello sbagliato | Il check certificati segnala i duplicati con stesso Subject+Issuer (elencando i thumbprint) e lo Status diverso da `Valid` sui certificati assegnati a servizi |
 | 10 | Test mail fallito con solo "Failure sending mail", nessuna causa utile | `SmtpClient` incapsula la causa reale nelle `InnerException` | Il log risale tutta la catena di eccezioni; `-TestMail` stampa prima dell'invio i parametri effettivi in uso |
 | 11 | Riepilogo per categoria mostrava "25" per `ManagedAvailability` con solo 3 problemi distinti | La stessa anomalia (health set Unhealthy, witness irraggiungibile, certificato in scadenza) viene spesso rilevata identica su più server dello stesso DAG; sommare ogni finding conta una volta per server invece che una volta per problema | Deduplica per `Item`+`Message` insieme (non sul solo `Item`, che avrebbe fatto sparire per errore dischi/code realmente diversi con la stessa etichetta) |
+| 12 | `Cannot convert value ... DisplayHint ... to type System.DateTime` alla lettura dello stato | Sotto **Windows PowerShell 5.1** (non riproducibile in pwsh 7), `Get-Date` chiamato **direttamente** dentro un literal `@{ Chiave = Get-Date }` o assegnato direttamente a una proprietà esistente (`$obj.Prop = Get-Date`) produce un oggetto che `ConvertTo-Json` serializza come `{"value":..., "DisplayHint":2, "DateTime":...}` invece di una data semplice; il cast `[datetime]` al giro successivo fallisce | Passare prima da una variabile (`$now = Get-Date`, poi usare `$now`) o da un cast esplicito `[datetime](Get-Date)`: entrambi verificati sicuri con un test dedicato. Vedi §8 per la regola generale |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 
@@ -375,6 +376,20 @@ primo tentativo.
   esempi usano sempre nomi generici (`EX-MBX-01`, `contoso.local`, `azienda.com`).
 - La configurazione reale (`ExchangeHealthCheck.config.json`) non è mai
   versionata; solo il template lo è.
+- **Sviluppato e testato prevalentemente in PowerShell 7 (pwsh), ma eseguito in
+  produzione su Windows PowerShell 5.1** (quella con cui gira Exchange
+  Management Shell): un bug reale (§5 riga 12) esisteva SOLO sotto 5.1 e non si
+  riproduceva affatto in pwsh 7. Regola pratica per non ripeterlo: **`Get-Date`
+  non va mai usato direttamente come valore di una proprietà** — né dentro un
+  literal `@{ Chiave = Get-Date }` né come assegnazione diretta
+  (`$obj.Prop = Get-Date`) — se quella proprietà può finire in
+  `ConvertTo-Json`/`Save-HcState`. Assegnarlo prima a una variabile
+  (`$now = Get-Date`, poi usare `$now`) o castarlo esplicitamente
+  (`[datetime](Get-Date)`). Più in generale: quando un difetto tocca la
+  serializzazione, il parsing di date/numeri o il comportamento dei cmdlet di
+  base, **verificare sotto Windows PowerShell 5.1 reale** (`powershell.exe`,
+  non solo `pwsh`) prima di dare per buono un fix — i due engine non si
+  comportano sempre allo stesso modo, come già successo qui.
 
 ## 9. Se riprendi questo progetto: da dove iniziare
 

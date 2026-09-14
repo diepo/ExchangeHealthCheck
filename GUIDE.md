@@ -212,6 +212,17 @@ relay, negato per l'invio anonimo. Usa una casella interna, oppure autentica
 l'invio (`Mail.UseDefaultCredentials` o `Mail.CredentialFile`), oppure crea un
 receive connector dedicato limitato per IP.
 
+**"Cannot convert value ... DisplayHint ... to type System.DateTime"**
+Bug risolto: sotto Windows PowerShell 5.1, una data salvata in un certo modo
+nello stato degli alert poteva diventare illeggibile al giro successivo.
+Aggiorna alla versione più recente dello script. Se il file di stato è già
+danneggiato, cancellalo (si ricostruisce da solo, e gli alert già noti
+verranno rinotificati una volta come "nuovi"):
+
+```powershell
+Remove-Item .\State\alert-state.json
+```
+
 ## 8. Sicurezza e privacy dei dati
 
 - Lo script non modifica nulla in Exchange: solo cmdlet `Get-*` e `Test-*`.
