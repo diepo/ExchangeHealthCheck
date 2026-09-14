@@ -131,7 +131,11 @@ notificata: il giro successivo riprova, non resta in silenzio per il cooldown.
 secco) apre con un riepilogo **per categoria** (Disk, Service, Queue,
 Certificate, ...): quante cose sono Critical/Warning in ciascuna, prima ancora
 del dettaglio server per server. Risponde a "cosa non va nell'infrastruttura"
-senza dover aprire ogni tabella.
+senza dover aprire ogni tabella. Il numero conta i **problemi distinti**, non
+un'occorrenza per server: se lo stesso health set o lo stesso certificato è
+segnalato identico su 5 server dello stesso DAG (spesso è davvero la stessa
+causa), conta 1, non 5. Due dischi pieni su server diversi, con GB liberi
+realmente diversi, restano invece due voci — non sono la stessa cosa.
 
 **Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
 categorie, server, dettaglio), quando in un giro compare qualcosa di davvero

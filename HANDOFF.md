@@ -229,6 +229,19 @@ nell'infrastruttura" a colpo d'occhio, senza dover scorrere ogni server. In
 mail è posizionato subito dopo i contatori aggregati, prima delle tabelle di
 dettaglio.
 
+**Conta occorrenze distinte, non ogni server** (bug reale, corretto dopo il
+primo test su ambiente vero: un giro mostrava "25" per `ManagedAvailability`
+quando i problemi distinti erano solo 3, ripetuti su più server dello stesso
+DAG). La deduplica raggruppa per **`Item` + testo del `Message`**, non sul solo
+`Item`: un health set Unhealthy, un witness irraggiungibile o un certificato in
+scadenza vengono spesso rilevati **identici** su più server (stessa causa,
+stesso messaggio) e vanno contati una volta sola. Ma `Item` da solo non basta
+come chiave — due dischi `C:` pieni su server diversi condividono l'etichetta
+pur essendo due problemi realmente distinti (GB liberi reali diversi nel
+messaggio), e la stessa cosa vale per `Queue` (`TotalMessages` è lo stesso Item
+su ogni server, ma il messaggio riporta il conteggio reale di quel server).
+Deduplicare sul solo `Item` li avrebbe fatti sparire per errore.
+
 **Due canali di notifica distinti, con scopi diversi**:
 
 1. **Mail di riepilogo** (`New-HcMailBody`, invariata nella sua logica di invio):
@@ -302,6 +315,7 @@ pubblico, cronologici.
 | 8 | Il server locale (quello da cui gira lo script) risultava `Connectivity Critical` | `Invoke-Command` verso il proprio nome apre comunque una connessione WinRM di loopback, soggetta ad autenticazione Kerberos, SPN e al loopback security check di Windows | Il target che coincide col computer locale viene eseguito in sessione diretta, non via WinRM |
 | 9 | Due certificati pubblici con lo stesso nome, uno scaduto, causa probabile di `Transport.ServerCertMismatch` | I connector referenziano il certificato per `TlsCertificateName` (`<I>Issuer<S>Subject`), non per thumbprint: due certificati con stesso Subject e Issuer sono indistinguibili per Exchange, che può agganciare quello sbagliato | Il check certificati segnala i duplicati con stesso Subject+Issuer (elencando i thumbprint) e lo Status diverso da `Valid` sui certificati assegnati a servizi |
 | 10 | Test mail fallito con solo "Failure sending mail", nessuna causa utile | `SmtpClient` incapsula la causa reale nelle `InnerException` | Il log risale tutta la catena di eccezioni; `-TestMail` stampa prima dell'invio i parametri effettivi in uso |
+| 11 | Riepilogo per categoria mostrava "25" per `ManagedAvailability` con solo 3 problemi distinti | La stessa anomalia (health set Unhealthy, witness irraggiungibile, certificato in scadenza) viene spesso rilevata identica su più server dello stesso DAG; sommare ogni finding conta una volta per server invece che una volta per problema | Deduplica per `Item`+`Message` insieme (non sul solo `Item`, che avrebbe fatto sparire per errore dischi/code realmente diversi con la stessa etichetta) |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 
