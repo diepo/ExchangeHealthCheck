@@ -185,7 +185,8 @@ $DefaultConfigJson = @'
     "SubjectPrefix": "[Exchange Health]",
     "AttachCsv": true,
     "IncludeQueueSummary": true,
-    "QueueAlertSubjectTag": "ATTENZIONE CODE"
+    "QueueAlertSubjectTag": "ATTENZIONE CODE",
+    "SeparateAlertSubjectTag": "WARNING FOUND"
   },
   "Console": {
     "ShowCategorySummary": true,
@@ -2219,6 +2220,65 @@ function New-HcMailBody {
     return $sb.ToString()
 }
 
+# Sottoinsieme dei finding "davvero nuovi" degno di una mail dedicata, separata
+# da quella di riepilogo che copre comunque tutto: solo cio che e appena
+# comparso o e appena peggiorato in QUESTO giro (mai un promemoria su
+# un'anomalia gia nota, quella resta solo nel riepilogo). Regola, decisa
+# esplicitamente dall'utente:
+#   - qualunque categoria diversa da Queue: solo un nuovo Critical (o un
+#     Warning che diventa Critical) la fa scattare;
+#   - categoria Queue: conta il valore numerico del finding (messaggi in
+#     coda), non la sua severita - una coda che passa da 15 a 18 non deve
+#     generare rumore, quindi serve superare Thresholds.QueueSubjectThreshold
+#     (la stessa soglia usata per il tag "ATTENZIONE CODE" in oggetto) a
+#     prescindere che sia gia Warning o Critical.
+function Get-HcUrgentFindings {
+    param([object[]]$NewFindings, [object[]]$EscalatedFindings)
+
+    $queueThreshold = [int64]$script:Config.Thresholds.QueueSubjectThreshold
+    if ($queueThreshold -le 0) { $queueThreshold = 200 }
+
+    $candidates = @($NewFindings) + @($EscalatedFindings)
+
+    return @($candidates | Where-Object {
+        if ($_.Category -eq 'Queue') {
+            $numericValue = 0
+            [void][int64]::TryParse([string]$_.Value, [ref]$numericValue)
+            return ($numericValue -ge $queueThreshold)
+        }
+        return ($_.Severity -eq 'Critical')
+    })
+}
+
+# Corpo minimale, pensato per essere letto in pochi secondi: solo le righe delle
+# novita, niente contatori/categoria/server che sono gia nella mail di riepilogo.
+function New-HcUrgentAlertBody {
+    param([object[]]$UrgentFindings, [object[]]$NewFindings)
+
+    $orgName = $script:Config.Organization.Name
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("<div style='font-family:Segoe UI,Arial,sans-serif;font-size:13px;max-width:900px;'>")
+    [void]$sb.AppendLine("<div style='background:#c0392b;color:#fff;padding:12px 16px;border-radius:4px;font-size:16px;font-weight:600;'>Novita da verificare - $(ConvertTo-HcHtmlText $orgName)</div>")
+    [void]$sb.AppendLine("<p style='color:#7f8c8d;font-size:12px;margin:8px 0 14px 0;'>Mail dedicata alle sole novita di questo giro (nuovo Critical, o coda oltre soglia). Il riepilogo completo dell'ambiente arriva separatamente.</p>")
+
+    [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;font-size:12px;'>")
+    [void]$sb.AppendLine("<tr style='background:#f4f6f7;text-align:left;'><th style='border:1px solid #dfe4e6;'>Stato</th><th style='border:1px solid #dfe4e6;'>Server</th><th style='border:1px solid #dfe4e6;'>Categoria</th><th style='border:1px solid #dfe4e6;'>Dettaglio</th></tr>")
+
+    $newKeys = @($NewFindings | ForEach-Object { $_.Key })
+    foreach ($row in ($UrgentFindings | Sort-Object Server, Category)) {
+        $stato = if ($newKeys -contains $row.Key) { 'NUOVO' } else { 'PEGGIORATO' }
+        $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;color:#c0392b;'>{0}</td>" +
+            "<td style='border:1px solid #dfe4e6;font-weight:600;'>{1}</td>" +
+            "<td style='border:1px solid #dfe4e6;'>{2}</td>" +
+            "<td style='border:1px solid #dfe4e6;'>{3}</td></tr>"
+        [void]$sb.AppendLine(($template -f $stato, (ConvertTo-HcHtmlText $row.Server), (ConvertTo-HcHtmlText $row.Category), (ConvertTo-HcHtmlText $row.Message)))
+    }
+    [void]$sb.AppendLine('</table>')
+    [void]$sb.AppendLine("<p style='color:#95a5a6;font-size:11px;margin-top:14px;'>$(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')</p>")
+    [void]$sb.AppendLine('</div>')
+    return $sb.ToString()
+}
+
 function Send-HcMail {
     param(
         [Parameter(Mandatory)][string]$Subject,
@@ -2545,6 +2605,23 @@ try {
         }
         elseif ($needHeartbeat) {
             $nextState.LastHeartbeat = Get-Date
+        }
+
+        # --- Mail dedicata alle sole novita (separata dal riepilogo appena inviato)
+        # Indipendente dall'esito del riepilogo: non incide sullo stato degli alert
+        # (quello resta legato solo al riepilogo, sopra), e un canale aggiuntivo.
+        $urgentFindings = Get-HcUrgentFindings -NewFindings $alerts.New -EscalatedFindings $alerts.Escalated
+        if ($urgentFindings.Count -gt 0) {
+            $urgentTagText = [string]$script:Config.Mail.SeparateAlertSubjectTag
+            if (-not $urgentTagText) { $urgentTagText = 'WARNING FOUND' }
+            $urgentSubject = '{0} {1} - {2} - {3} novita' -f `
+                $script:Config.Mail.SubjectPrefix, $urgentTagText, $script:Config.Organization.Name, $urgentFindings.Count
+            $urgentBody = New-HcUrgentAlertBody -UrgentFindings $urgentFindings -NewFindings $alerts.New
+
+            $urgentSent = [bool](Send-HcMail -Subject $urgentSubject -Body $urgentBody -Priority High)
+            if (-not $urgentSent) {
+                Write-HcLog 'Mail dedicata alle novita non inviata (il riepilogo, se partito, resta comunque la fonte di verita per lo stato).' -Level WARN
+            }
         }
     }
     else {

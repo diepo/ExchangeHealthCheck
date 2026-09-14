@@ -165,7 +165,8 @@
     "SubjectPrefix": "[Exchange Health]",
     "AttachCsv": true,
     "IncludeQueueSummary": true,
-    "QueueAlertSubjectTag": "ATTENZIONE CODE"
+    "QueueAlertSubjectTag": "ATTENZIONE CODE",
+    "SeparateAlertSubjectTag": "WARNING FOUND"
   },
 
   "Console": {
