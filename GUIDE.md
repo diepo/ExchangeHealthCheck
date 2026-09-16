@@ -193,6 +193,15 @@ Per rimuoverla: `.\Install-ExchangeHealthCheckTask.ps1 -Unregister`
 
 ## 7. Domande frequenti
 
+**Come faccio a sapere che versione dello script ho in esecuzione?**
+È la prima riga di log di ogni esecuzione: `Invoke-ExchangeHealthCheck.ps1 -
+versione X.Y.Z`, subito dopo la riga di separatore. Utile soprattutto quando
+aggiorni lo script su una macchina diversa da quella su cui lo sviluppi: se
+il problema che stai vedendo dovrebbe essere già risolto ma persiste
+identico, la prima cosa da controllare è che la macchina di esecuzione abbia
+davvero l'ultima versione — il numero è anche nel file `VERSION` alla radice
+del repository, da confrontare senza dover aprire l'intero script.
+
 **"WinRM cannot find the computer" su un server acceso e funzionante**
 Quasi sempre è risoluzione nome, non un server giù. Verifica con l'FQDN:
 `Invoke-Command -ComputerName server.tuodominio.local { $env:COMPUTERNAME }`.

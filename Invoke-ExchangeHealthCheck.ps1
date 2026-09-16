@@ -54,6 +54,14 @@
     lo snap-in / apra una remote session verso un server Exchange (vedi config).
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
+
+    Versione script: 1.9.0 (2026-09-16)
+    Ultimo aggiornamento: Invoke-HcExchangeWithTimeout non spegne piu la sessione
+    Exchange esterna (Exchange Management Shell / Connect-ExchangeServer) quando
+    ne snap-in ne Organization.ConnectTo sono disponibili - vedi HANDOFF.md §3.11
+    (bug 21) per il dettaglio completo. La versione compare anche come prima
+    riga di log di ogni esecuzione: e il modo piu veloce per verificare se la
+    macchina su cui giri lo script ha davvero l'ultimo aggiornamento.
 #>
 
 [CmdletBinding()]
@@ -70,6 +78,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
+$script:ScriptVersion  = '1.9.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -2988,6 +2997,7 @@ try {
     $script:LogFile = Join-Path $logDir ('healthcheck-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
 
     Write-HcLog '============================================================'
+    Write-HcLog ('Invoke-ExchangeHealthCheck.ps1 - versione {0}' -f $script:ScriptVersion)
     Write-HcLog ('Avvio health check Exchange - organizzazione "{0}"' -f $script:Config.Organization.Name)
 
     # --- Mail di test

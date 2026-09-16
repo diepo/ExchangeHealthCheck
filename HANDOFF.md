@@ -681,6 +681,17 @@ primo tentativo.
   un valore mai visto va verso `Unknown`, mai verso `Critical` per default —
   un falso allarme costa fiducia nello strumento, un falso silenzio su
   `Unknown` resta comunque visibile nel report.
+- **Versione dichiarata nello script, stampata a ogni esecuzione**: dopo un
+  episodio in cui un fix era stato pushato ma l'utente stava ancora testando
+  una copia non aggiornata sulla macchina di esecuzione (dubbio impossibile
+  da sciogliere a distanza senza un riferimento diretto), `$script:ScriptVersion`
+  (vicino agli altri `$script:` di inizializzazione) va incrementato a ogni
+  commit che tocca il comportamento dello script, e il file `VERSION` alla
+  radice del repository tenuto allineato allo stesso valore. La versione è
+  anche la prima riga di log di ogni esecuzione (`Invoke-ExchangeHealthCheck.ps1
+  - versione X.Y.Z`): basta guardare l'inizio di un log per sapere con
+  certezza quale versione ha davvero girato, senza dover confrontare il
+  contenuto del file.
 
 ## 9. Se riprendi questo progetto: da dove iniziare
 
