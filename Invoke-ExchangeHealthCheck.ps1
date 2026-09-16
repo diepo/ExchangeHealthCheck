@@ -548,9 +548,14 @@ function Remove-HcStaleExchangeProxy {
     }
 
     try {
+        # *> silenzia tutti gli stream, non solo gli errori: un modulo di
+        # implicit remoting Exchange esporta centinaia di cmdlet, e la sua
+        # rimozione stampa l'elenco di quelli disattivati (rumore atteso,
+        # non un errore) su uno stream diverso da quello di successo - il
+        # solo -ErrorAction non lo intercetta.
         Get-Module -ErrorAction SilentlyContinue |
             Where-Object { $_.ExportedCommands.ContainsKey('Get-ExchangeServer') } |
-            Remove-Module -Force -ErrorAction SilentlyContinue
+            Remove-Module -Force -ErrorAction SilentlyContinue *> $null
     }
     catch { }
 }

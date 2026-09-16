@@ -517,6 +517,14 @@ la sessione era genuinamente esterna e non recuperabile da questo script),
 il finding `Unknown` risultante lo dice esplicitamente, invece di ripetere
 l'errore di URI fuorviante per ogni check successivo dell'intero giro.
 
+**Nota (rumore in console)**: `Remove-Module -Force` su un modulo di
+implicit remoting Exchange stampa l'elenco dei centinaia di cmdlet che
+disattiva - rumore atteso, non un errore, ma confuso da vedere apparire
+subito dopo il log "sessione Exchange caduta". La chiamata usa `*> $null`
+(tutti gli stream, non solo gli errori) per silenziarlo: `-ErrorAction
+SilentlyContinue` da solo non basta, perché quell'output non passa dallo
+stream di errore.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
