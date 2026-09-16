@@ -276,6 +276,49 @@ notifiche di questo giro: resta visibile anche se quella coda è già nota e in
 cooldown — a differenza della mail dedicata alle novità, che invece su una
 coda già nota non scatterebbe.
 
+### 3.11 Timeout duro sui cmdlet RPC senza timeout proprio
+
+`Get-ExchangeCertificate`, `Get-HealthReport` e `Get-ServerHealth` non
+espongono alcun parametro di timeout: se il servizio a cui fanno RPC su un
+server è lento o inceppato, la chiamata resta appesa finché non risponde —
+osservato in produzione, `Get-ExchangeCertificate` fermo per 300,3s (il
+timeout RPC di default di Windows) su un server con un problema di backend
+IIS, bloccando l'intero giro sugli altri server ancora in coda. Diverso dal
+caso WinRM/DNS (§3.3, §3.9), dove un `-SessionOption`/timeout esplicito basta:
+questi cmdlet Exchange non hanno un parametro equivalente da passare.
+
+`Invoke-HcExchangeWithTimeout` risolve il problema isolando la chiamata in un
+**job separato** (un processo `powershell.exe` indipendente): un job, a
+differenza di una chiamata diretta nella sessione corrente, può essere
+**terminato con forza** (`Stop-Job`) se supera il limite. Il job deve
+riottenere l'accesso a Exchange da solo — parte in un processo nuovo che non
+eredita né lo snap-in né la sessione remota già aperti nel processo
+principale — rifacendo lì dentro lo stesso identico percorso a due vie di
+`Connect-HcExchange` (snap-in locale se registrato, altrimenti
+`New-PSSession -ConfigurationName Microsoft.Exchange` verso
+`Organization.ConnectTo`).
+
+Applicata a:
+- `Get-ExchangeCertificate` → `Thresholds.CertificateCheckTimeoutSeconds`
+  (default 30s)
+- `Get-HealthReport` → `Thresholds.ManagedAvailabilityTimeoutSeconds`
+  (default 30s)
+- `Get-ServerHealth` (drill-down dei monitor, §3.10) →
+  `HealthReport.MonitorDetailTimeoutSeconds` (default 30s, tenuto separato
+  perché questa chiamata può ripetersi una volta per ogni health set non sano
+  sullo stesso server, e non deve sommare più timeout lunghi in sequenza)
+
+Il default di 30s non è arbitrario: una risposta sana di `Get-HealthReport`
+osservata in produzione impiegava ~5s, quindi 30s lascia margine ampio prima
+di dichiarare il servizio non responsivo, restando comunque molto sotto i
+300s del timeout RPC di sistema che altrimenti si subirebbe per intero.
+
+**Costo**: ogni chiamata protetta spende qualche secondo in più per l'avvio
+del processo del job e il ricaricamento dell'accesso Exchange, anche nel caso
+sano — accettabile per due chiamate isolate per server, non pensato per
+essere applicato a ogni singolo cmdlet Exchange dello script senza
+valutazione caso per caso.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -285,9 +328,9 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `Organization` | Nome, server a cui connettersi (`ConnectTo`, usato solo se non si è già in Exchange Management Shell), `ViewEntireForest`, rilevamento/override del domain controller |
 | `Servers` | Perimetro (`Include`/`Exclude`/`SiteFilter`/`IncludeEdge`), `UseFqdnForRemoting`, `SkipExchangeChecksWhenOffline` |
 | `Checks` | Un booleano per famiglia di controllo (Os, Disk, Services, Components, Health, Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi) |
-| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code, copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità) |
+| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code, copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
-| `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet` |
+| `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
 | `Console` | `ShowCategorySummary`, `ShowQueueSummary` |
 | `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets, Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
@@ -317,6 +360,7 @@ pubblico, cronologici.
 | 10 | Test mail fallito con solo "Failure sending mail", nessuna causa utile | `SmtpClient` incapsula la causa reale nelle `InnerException` | Il log risale tutta la catena di eccezioni; `-TestMail` stampa prima dell'invio i parametri effettivi in uso |
 | 11 | Riepilogo per categoria mostrava "25" per `ManagedAvailability` con solo 3 problemi distinti | La stessa anomalia (health set Unhealthy, witness irraggiungibile, certificato in scadenza) viene spesso rilevata identica su più server dello stesso DAG; sommare ogni finding conta una volta per server invece che una volta per problema | Deduplica per `Item`+`Message` insieme (non sul solo `Item`, che avrebbe fatto sparire per errore dischi/code realmente diversi con la stessa etichetta) |
 | 12 | `Cannot convert value ... DisplayHint ... to type System.DateTime` alla lettura dello stato | Sotto **Windows PowerShell 5.1** (non riproducibile in pwsh 7), `Get-Date` chiamato **direttamente** dentro un literal `@{ Chiave = Get-Date }` o assegnato direttamente a una proprietà esistente (`$obj.Prop = Get-Date`) produce un oggetto che `ConvertTo-Json` serializza come `{"value":..., "DisplayHint":2, "DateTime":...}` invece di una data semplice; il cast `[datetime]` al giro successivo fallisce | Passare prima da una variabile (`$now = Get-Date`, poi usare `$now`) o da un cast esplicito `[datetime](Get-Date)`: entrambi verificati sicuri con un test dedicato. Vedi §8 per la regola generale |
+| 13 | Il giro sembrava bloccato indefinitamente; il log mostrava solo l'ultimo check completato (`ManagedAvailability`) senza altro per minuti | In realtà il check *successivo* (`Certificate`) era fermo, non quello loggato per ultimo: la durata si stampa solo a fine check, quindi l'ultimo nome visibile in log durante un blocco non è quello bloccato, è quello appena prima. `Get-ExchangeCertificate` era appeso 300,3s (il timeout RPC di default di Windows) su un server con un problema di backend IIS pre-esistente | `Invoke-HcExchangeWithTimeout` (§3.11): la chiamata gira in un job separato terminabile con forza entro un limite configurabile (default 30s) |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

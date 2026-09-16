@@ -223,6 +223,20 @@ verranno rinotificati una volta come "nuovi"):
 Remove-Item .\State\alert-state.json
 ```
 
+**Il giro sembra bloccato per minuti, senza errori**
+Guarda l'ultima riga di log con attenzione: la durata di un check si stampa
+solo quando **finisce**, quindi il nome che vedi fermo da minuti è quasi
+sempre quello **appena completato**, non quello bloccato — il vero
+responsabile è il check *successivo*, ancora in corso. I cmdlet
+`Get-ExchangeCertificate` e `Get-HealthReport` non hanno un timeout proprio:
+se il servizio a cui fanno RPC su un server è inceppato, restano appesi anche
+per diversi minuti (il timeout RPC di default di Windows è 300 secondi). Dalla
+versione più recente, questi due controlli hanno un limite configurabile
+(default 30 secondi — `Thresholds.CertificateCheckTimeoutSeconds` e
+`Thresholds.ManagedAvailabilityTimeoutSeconds`): oltre quel limite il check
+viene abbandonato e segnato come non riuscito, invece di bloccare il resto del
+giro sugli altri server.
+
 ## 8. Sicurezza e privacy dei dati
 
 - Lo script non modifica nulla in Exchange: solo cmdlet `Get-*` e `Test-*`.
