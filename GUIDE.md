@@ -137,6 +137,13 @@ segnalato identico su 5 server dello stesso DAG (spesso è davvero la stessa
 causa), conta 1, non 5. Due dischi pieni su server diversi, con GB liberi
 realmente diversi, restano invece due voci — non sono la stessa cosa.
 
+**Riepiloghi per cluster e per database.** Sullo stesso principio, la mail
+mostra anche una vista aggregata dello **stato del cluster per DAG** (nodi
+totali, quanti attivi, quali fermi e il loro stato) e delle **copie database
+per server** (quante sane, quante no, con il dettaglio). Raccolte sempre,
+non solo quando c'è un problema — così vedi subito se un nodo è `Down` o una
+copia è `Failed`/`Seeding` senza dover interrogare manualmente ogni server.
+
 **Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
 categorie, server, dettaglio), quando in un giro compare qualcosa di davvero
 nuovo o peggiorato ne parte una seconda, minimale, con oggetto **"WARNING
@@ -182,6 +189,13 @@ interrogato direttamente. Se accade, aggiorna alla versione più recente.
 **"Nessun DAG rilevato"**
 Normale su un server standalone senza DAG: i check DAG/replica vengono
 saltati, il resto continua.
+
+**Il controllo dei nodi cluster non compare mai, nemmeno come errore**
+Serve il cmdlet `Get-ClusterNode`, che richiede lo strumento RSAT "Failover
+Clustering Tools" (`RSAT-Clustering-PowerShell`) installato sulla macchina da
+cui esegui lo script — non basta avere Exchange. Se manca, dalla versione più
+recente ricevi un finding `Warning` esplicito che te lo dice; se invece non
+vedi nulla, aggiorna alla versione più recente.
 
 **"object ... could not be found on <domain controller>"**
 Prova `"Organization": { "ViewEntireForest": false }`. Se persiste, imposta

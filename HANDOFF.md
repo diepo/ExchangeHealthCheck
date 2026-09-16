@@ -319,6 +319,44 @@ sano — accettabile per due chiamate isolate per server, non pensato per
 essere applicato a ogni singolo cmdlet Exchange dello script senza
 valutazione caso per caso.
 
+### 3.12 Riepiloghi aggregati: cluster per DAG e copie database per server
+
+Stesso principio della vista aggregata delle code (§3.9): una fotografia
+raccolta **sempre**, non solo quando c'è un problema, per rispondere a colpo
+d'occhio a "come sta l'infrastruttura" senza dover aprire ogni singola
+tabella di dettaglio.
+
+- **Stato cluster per DAG** (`$script:ClusterSummary`, popolato dentro
+  `Invoke-HcDagCheck`): una riga per DAG con totale nodi, quanti `Up`, quanti
+  non `Up` (con nome e stato di ciascuno), stato del witness. Usa la stessa
+  fonte dati (`Get-HcClusterNode`) già usata per i singoli finding `Cluster`.
+- **Copie database per server** (`$script:DatabaseCopySummary`, popolato
+  dentro `Invoke-HcCopyStatusCheck`): una riga per server con totale copie
+  ospitate, quante sane, quante non sane (con nome del DB e stato di
+  ciascuna). Stessa fonte dati già usata per i finding `DatabaseCopy`.
+
+Renderizzati sia a console (`Write-HcClusterSummaryConsole`,
+`Write-HcDatabaseSummaryConsole`, sullo stesso modello di
+`Write-HcQueueSummaryConsole`) sia in mail, posizionati subito prima della
+vista aggregata delle code — infrastruttura e dati vengono prima del traffico
+nell'ordine di lettura. Disattivabili singolarmente
+(`Console.ShowClusterSummary`/`ShowDatabaseSummary`,
+`Mail.IncludeClusterSummary`/`IncludeDatabaseSummary`).
+
+**Bug di visibilità corretto nello stesso commit**: se `Get-ClusterNode` non è
+disponibile del tutto sulla macchina da cui gira lo script (manca il modulo
+FailoverClusters, cioè lo strumento RSAT "Failover Clustering Tools"), l'intero
+controllo cluster veniva **saltato in silenzio** — nessun errore, nessun
+finding, nessuna riga di log visibile. Un nodo cluster `Down` sarebbe passato
+inosservato senza che nulla lo segnalasse. Ora l'assenza della capacità
+produce essa stessa un finding `Warning`, con l'indicazione esplicita di quale
+componente installare (`RSAT-Clustering-PowerShell`). Lezione generale,
+coerente con §8: **un `if (Test-HcCommand ...) { ... }` senza un `else` che
+segnali l'assenza è un modo comune per far sparire silenziosamente un'intera
+famiglia di controlli** — va sempre verificato che manchi un ramo visibile per
+il caso "capacità non disponibile", non solo per il caso "controllo eseguito
+ma fallito".
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -332,11 +370,11 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
-| `Console` | `ShowCategorySummary`, `ShowQueueSummary` |
+| `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary`, `ShowQueueSummary` |
 | `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets, Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
 | `ExtraServices` | Servizi non-Exchange da includere nel check Services (es. W3SVC, WinRM) |
 | `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare |
-| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10) |
+| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12) |
 | `Paths` | Cartelle di log/report/stato, retention |
 
 ## 5. Bug reali trovati durante il test su ambiente vero — con causa e fix
@@ -362,6 +400,7 @@ pubblico, cronologici.
 | 12 | `Cannot convert value ... DisplayHint ... to type System.DateTime` alla lettura dello stato | Sotto **Windows PowerShell 5.1** (non riproducibile in pwsh 7), `Get-Date` chiamato **direttamente** dentro un literal `@{ Chiave = Get-Date }` o assegnato direttamente a una proprietà esistente (`$obj.Prop = Get-Date`) produce un oggetto che `ConvertTo-Json` serializza come `{"value":..., "DisplayHint":2, "DateTime":...}` invece di una data semplice; il cast `[datetime]` al giro successivo fallisce | Passare prima da una variabile (`$now = Get-Date`, poi usare `$now`) o da un cast esplicito `[datetime](Get-Date)`: entrambi verificati sicuri con un test dedicato. Vedi §8 per la regola generale |
 | 13 | Il giro sembrava bloccato indefinitamente; il log mostrava solo l'ultimo check completato (`ManagedAvailability`) senza altro per minuti | In realtà il check *successivo* (`Certificate`) era fermo, non quello loggato per ultimo: la durata si stampa solo a fine check, quindi l'ultimo nome visibile in log durante un blocco non è quello bloccato, è quello appena prima. `Get-ExchangeCertificate` era appeso 300,3s (il timeout RPC di default di Windows) su un server con un problema di backend IIS pre-esistente | `Invoke-HcExchangeWithTimeout` (§3.11): la chiamata gira in un job separato terminabile con forza entro un limite configurabile (default 30s) |
 | 14 | `ContentIndex` segnalato Critical su `NotApplicable` | Il codice trattava "qualunque cosa diversa da Crawling/Seeding/Suspended" come Critical per default; `NotApplicable` è invece uno stato normale — tipicamente una copia ritardata (lagged copy, `ReplayLagTime` > 0) che Exchange non indicizza di proposito perché non è pensata per servire ricerche live | Mappatura esplicita per stato (`Failed`/`FailedAndSuspended` → Critical, `Crawling`/`Seeding`/`Suspended`/`Unknown` → Warning, `NotApplicable`/`Disabled` → Info); un valore mai visto prima diventa `Unknown`, non più Critical per default |
+| 15 | Un nodo cluster `Down` reale (incidente su un membro DAG) non risultava da nessuna parte nel report | `Get-ClusterNode` non era disponibile sulla macchina da cui girava lo script (modulo FailoverClusters/RSAT mancante); il controllo era scritto come `if (Test-HcCommand ...) { ... }` senza alcun ramo per il caso "comando non disponibile", quindi l'intero controllo cluster spariva senza lasciare traccia | Aggiunto un `else` che produce un finding `Warning` esplicito quando la capacità manca del tutto, con l'indicazione di quale componente RSAT installare |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 
