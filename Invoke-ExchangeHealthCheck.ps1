@@ -2433,20 +2433,31 @@ function Get-HcDatabaseSummary {
     return $rows.ToArray()
 }
 
+function Get-HcNaturalSortKey {
+    param([string]$Value)
+    # Confronto "naturale": ogni sequenza di cifre viene messa in chiave con
+    # zero-padding, cosi "DB2" ordina prima di "DB10" invece che dopo (come
+    # farebbe un confronto puramente lessicografico sulla stringa).
+    if (-not $Value) { return '' }
+    return [regex]::Replace($Value, '\d+', { param($m) $m.Value.PadLeft(20, '0') })
+}
+
 function Write-HcDatabasePerDbSummaryConsole {
     param([object[]]$DatabaseSummary)
 
     if (-not $DatabaseSummary -or $DatabaseSummary.Count -eq 0) { return }
 
     Write-Host ("`nStato per database - {0} database" -f $DatabaseSummary.Count) -ForegroundColor White
-    $header = '{0,-24} {1,-20} {2,6} {3,-60}' -f 'Database', 'Attivo su', 'Copie', 'Copie (Server:Stato)'
+    $header = '{0,-24} {1,-20} {2,6} {3}' -f 'Database', 'Attivo su', 'Copie', 'Copie (Server:Stato)'
     Write-Host $header -ForegroundColor Gray
     Write-Host ('-' * $header.Length) -ForegroundColor Gray
 
-    foreach ($row in ($DatabaseSummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, DbName)) {
-        $detail = $row.CopyDetail
-        if ($detail.Length -gt 60) { $detail = $detail.Substring(0, 57) + '...' }
-        $line = '{0,-24} {1,-20} {2,6} {3,-60}' -f $row.DbName, $row.ActiveServer, $row.CopyCount, $detail
+    # Ordine per nome database (numerico/naturale), non per severita: e un
+    # inventario fisso che si scorre sempre allo stesso modo - i problemi
+    # saltano gia all'occhio dal colore riga, non serve portarli in cima
+    # spostando l'ordine ad ogni giro.
+    foreach ($row in ($DatabaseSummary | Sort-Object { Get-HcNaturalSortKey $_.DbName })) {
+        $line = '{0,-24} {1,-20} {2,6} {3}' -f $row.DbName, $row.ActiveServer, $row.CopyCount, $row.CopyDetail
         Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.Severity)
     }
     Write-Host ""
@@ -2595,7 +2606,7 @@ function New-HcMailBody {
             "<th style='border:1px solid #dfe4e6;'>Copie</th>" +
             "<th style='border:1px solid #dfe4e6;'>Stato copie (Server:Stato)</th></tr>")
 
-        foreach ($row in ($dbPerDb | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, DbName)) {
+        foreach ($row in ($dbPerDb | Sort-Object { Get-HcNaturalSortKey $_.DbName })) {
             $color = Get-HcSeverityColor $row.Severity
             $activeStyle = if ($row.ActiveServer -eq '(nessuna)') { "color:#c0392b;font-weight:600;" } else { '' }
             $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;border-left:4px solid {0};'>{1}</td>" +

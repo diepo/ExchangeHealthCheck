@@ -151,7 +151,10 @@ e per ogni altra copia il suo stato grezzo di Exchange (`Healthy` = in sync,
 solo quando non è nello stato normale. Risponde direttamente a "questo
 database, chi lo serve adesso, e le altre copie sono allineate?" senza dover
 incrociare a mano le righe della vista per server. Se nessuna copia risulta
-attiva, il database compare comunque, marcato Critical.
+attiva, il database compare comunque, marcato Critical. Ordinata per nome
+database (numerico, non alfabetico puro: `DB2` prima di `DB10`), non per
+gravità — è un inventario che si scorre sempre nello stesso ordine, i
+problemi restano comunque visibili dal colore della riga.
 
 **Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
 categorie, server, dettaglio), quando in un giro compare qualcosa di davvero

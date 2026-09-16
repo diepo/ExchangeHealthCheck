@@ -449,6 +449,20 @@ database", gate `Mail.IncludeDatabasePerDbSummary`), subito dopo la vista
 per-server esistente. Non sostituisce quella vista: le due rispondono a
 domande diverse (salute di un server vs. salute di un database).
 
+**Ordinamento (bug 18)**: la prima versione ordinava per severita poi per
+nome, come le viste code/cluster - li ha senso perche sono viste "cosa non
+va", ma qui e un inventario fisso (tutti i database, sempre) che si vuole
+scorrere sempre nello stesso ordine, non uno che salta di posizione a ogni
+giro in base a chi ha un problema in quel momento. In piu il confronto per
+nome era lessicografico puro sulla stringa, quindi `"DAG5-DB12"` ordinava
+prima di `"DAG5-DB2"` (non tutti gli ambienti hanno i numeri con zero-padding
+a lunghezza fissa). `Get-HcNaturalSortKey` sostituisce ogni sequenza di
+cifre nel nome con la sua versione zero-paddata a 20 caratteri prima del
+confronto, ottenendo un ordine numerico anche senza padding esplicito nei
+nomi reali. La colonna dettaglio copie, inoltre, troncava a 60 caratteri:
+insufficiente con nomi server realistici e 4+ copie per database; il
+troncamento e stato rimosso, la riga si espande a quanto serve.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -495,6 +509,7 @@ pubblico, cronologici.
 | 15 | Un nodo cluster `Down` reale (incidente su un membro DAG) non risultava da nessuna parte nel report | `Get-ClusterNode` non era disponibile sulla macchina da cui girava lo script (modulo FailoverClusters/RSAT mancante); il controllo era scritto come `if (Test-HcCommand ...) { ... }` senza alcun ramo per il caso "comando non disponibile", quindi l'intero controllo cluster spariva senza lasciare traccia | Aggiunto un `else` che produce un finding `Warning` esplicito quando la capacità manca del tutto, con l'indicazione di quale componente RSAT installare |
 | 16 | `Cannot bind parameter 'ConnectionUri' ... Invalid URI: The hostname could not be parsed` su un check (`ComponentState`) che non costruisce alcun URI | Su un giro lungo (molti server) la sessione remota Exchange (`$script:ExSession`) diventa stale/disconnessa prima che lo script finisca; le funzioni proxy di `Import-PSSession` restano richiamabili anche a sessione morta, e il loro tentativo di riconnessione interna fallisce con un errore di URI che maschera la vera causa | `Test-HcExchangeSessionHealthy`/`Repair-HcExchangeSession` (§3.13): stato reale della sessione verificato e riparato prima dei check Exchange-side di ogni server, non solo all'avvio |
 | 17 | 150 messaggi totali su 12 code (~12,5 a coda, nessuna anomala) segnalati come `Warning` code, l'utente si aspettava l'allarme solo per una singola coda realmente alta | Il finding `TotalMessages` sommava tutte le code del server e lo confrontava con le **stesse** soglie (`QueueWarning`/`QueueCritical`) usate per giudicare una singola coda; tante code piccole sommate superavano la soglia pensata per un'unica coda bloccata | Soglie separate `QueueTotalWarning`/`QueueTotalCritical` (default 300/1000) per il totale-server, distinte da `QueueWarning`/`QueueCritical` che restano invariate per la singola coda |
+| 18 | Riepilogo per database (§3.15) mostrato in un ordine confuso (es. DB12 prima di DB01) e con la colonna "Copie (Server:Stato)" troncata con `...` su ambienti con nomi server lunghi e 4+ copie per database | L'ordinamento era severita-poi-nome (utile per le viste "solo problemi" come code/cluster, fuorviante per un inventario fisso che si scorre sempre allo stesso modo); il confronto per nome era lessicografico puro (`"DB12" < "DB2"` come stringhe); la colonna dettaglio era troncata a 60 caratteri, insufficiente con nomi server realistici (es. `GRPI-EXC-PCxx`) su 4 copie | Ordinamento per solo nome database con `Get-HcNaturalSortKey` (zero-padding delle sequenze numeriche, cosi l'ordine e numerico e non lessicografico); troncamento rimosso, la colonna si espande al contenuto |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 
