@@ -258,6 +258,26 @@ non indicizza di proposito, perché non è pensata per servire ricerche live.
 Aggiorna alla versione più recente: nelle versioni precedenti veniva segnalato
 per errore come Critical.
 
+**"Check non eseguibile sotto ComponentState — Cannot bind parameter 'ConnectionUri' ... hostname could not be parsed"**
+Non è un problema di rete o DNS, anche se l'errore lo sembra. Su un giro
+lungo con molti server, la sessione remota verso Exchange può diventare stale
+(scaduta per inattività) prima che lo script finisca; a quel punto un comando
+qualsiasi verso Exchange scatena un tentativo di riconnessione automatica
+interno che fallisce con questo errore fuorviante. Dalla versione più recente
+lo script verifica lo stato della sessione prima dei controlli Exchange di
+ogni server e la ricrea da solo quando serve: se lo vedi ancora, aggiorna alla
+versione più recente.
+
+**Il totale messaggi in coda di un server segnala "Warning" ma nessuna coda singola sembra alta**
+Bug risolto: il totale sommava tutte le code del server (anche tante code
+piccole, ciascuna con pochi messaggi) e lo confrontava con la stessa soglia
+usata per una singola coda in stallo. Dalla versione più recente il totale ha
+una soglia propria, più alta (`Thresholds.QueueTotalWarning`/
+`QueueTotalCritical`, default 300/1000), pensata per un backlog reale
+sull'intero server; la soglia per singola coda (`QueueWarning`/
+`QueueCritical`) resta quella di prima e continua a segnalare subito una coda
+davvero bloccata.
+
 ## 8. Sicurezza e privacy dei dati
 
 - Lo script non modifica nulla in Exchange: solo cmdlet `Get-*` e `Test-*`.

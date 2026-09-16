@@ -357,6 +357,61 @@ famiglia di controlli** — va sempre verificato che manchi un ramo visibile per
 il caso "capacità non disponibile", non solo per il caso "controllo eseguito
 ma fallito".
 
+### 3.13 Sessione Exchange stale su giri lunghi
+
+Segnalato dall'utente: un errore che sembrava di rete —
+`Cannot bind parameter 'ConnectionUri' ... Invalid URI: The hostname could
+not be parsed` — su `ComponentState`, un check (`Get-ServerComponentState`)
+che non costruisce alcun URI proprio. La causa reale sta un livello più in
+basso: su un giro lungo (molti server), la sessione PowerShell remota di
+Exchange aperta all'inizio dello script (`$script:ExSession`, percorso
+`New-PSSession -ConfigurationName Microsoft.Exchange` quando non c'è lo
+snap-in locale) può diventare stale/disconnessa — timeout di idle di WinRM o
+dell'endpoint Exchange — prima che lo script finisca di girare su tutti i
+server.
+
+**Perché è fuorviante**: `Import-PSSession` lascia le funzioni proxy nella
+sessione corrente anche quando la sessione remota sottostante non è più
+viva — `Test-HcCommand 'Get-ServerComponentState'` continua a trovarle e a
+restituire vero. Alla prima chiamata reale, il proxy tenta una riconnessione
+interna automatica, e **è quel tentativo interno a fallire** con un errore di
+URI/rete, mascherando completamente l'errore originale (che sarebbe stato
+semplicemente "sessione non più valida").
+
+**Perché richiamare `Connect-HcExchange` da solo non basta**: il suo unico
+controllo è `if (Test-HcCommand 'Get-ExchangeServer')` — verifica che la
+*funzione* esista, non che la *sessione* dietro sia viva. Con le funzioni
+proxy ancora presenti, quel controllo risulta vero e la funzione non fa
+nulla.
+
+**Fix**: `Test-HcExchangeSessionHealthy` legge lo stato reale dell'oggetto
+sessione (`$script:ExSession.State -eq 'Opened'`; sempre vero quando si usa
+lo snap-in locale, dove non esiste un oggetto sessione che possa invecchiare
+allo stesso modo) e `Repair-HcExchangeSession` chiude esplicitamente la
+sessione stale e ne apre una nuova. Verificato prima dei check Exchange-side
+di **ogni singolo server** nel loop principale, non solo all'avvio dello
+script — un giro su decine di server non si porta più dietro una sessione
+morta senza accorgersene fino al primo errore confuso.
+
+### 3.14 Soglia del totale-code separata dalla soglia per singola coda
+
+Segnalato dall'utente: 150 messaggi in coda su un server, spalmati su 12 code
+(media ~12,5 a coda, nessuna singolarmente anomala), generavano lo stesso
+finding `Warning` di una singola coda realmente bloccata a 150 messaggi.
+Causa: `Invoke-HcQueueCheck` sommava `MessageCount` di tutte le code reali del
+server (`$total`) e confrontava quella somma con `Thresholds.QueueWarning`/
+`QueueCritical` — le stesse soglie già usate, poche righe sotto, per giudicare
+*una singola coda*. Le due grandezze misurano cose diverse (salute
+complessiva del mail flow sul server vs. una coda specifica in stallo verso
+una destinazione) e non hanno motivo di condividere la soglia.
+
+**Fix**: nuove chiavi `Thresholds.QueueTotalWarning`/`QueueTotalCritical`
+(default 300/1000, deliberatamente più alte delle soglie per singola coda)
+usate solo per il finding aggregato `TotalMessages`; `QueueWarning`/
+`QueueCritical` restano invariate per il giudizio per-coda. Non tocca la
+soglia `QueueSubjectThreshold` usata per l'oggetto mail "ATTENZIONE CODE" e
+per l'innesco della mail urgente, che è un meccanismo indipendente.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -366,7 +421,7 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `Organization` | Nome, server a cui connettersi (`ConnectTo`, usato solo se non si è già in Exchange Management Shell), `ViewEntireForest`, rilevamento/override del domain controller |
 | `Servers` | Perimetro (`Include`/`Exclude`/`SiteFilter`/`IncludeEdge`), `UseFqdnForRemoting`, `SkipExchangeChecksWhenOffline` |
 | `Checks` | Un booleano per famiglia di controllo (Os, Disk, Services, Components, Health, Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi) |
-| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code, copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
+| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code (`QueueWarning`/`QueueCritical` per singola coda, `QueueTotalWarning`/`QueueTotalCritical` per il totale-server, §3.14), copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
@@ -401,6 +456,8 @@ pubblico, cronologici.
 | 13 | Il giro sembrava bloccato indefinitamente; il log mostrava solo l'ultimo check completato (`ManagedAvailability`) senza altro per minuti | In realtà il check *successivo* (`Certificate`) era fermo, non quello loggato per ultimo: la durata si stampa solo a fine check, quindi l'ultimo nome visibile in log durante un blocco non è quello bloccato, è quello appena prima. `Get-ExchangeCertificate` era appeso 300,3s (il timeout RPC di default di Windows) su un server con un problema di backend IIS pre-esistente | `Invoke-HcExchangeWithTimeout` (§3.11): la chiamata gira in un job separato terminabile con forza entro un limite configurabile (default 30s) |
 | 14 | `ContentIndex` segnalato Critical su `NotApplicable` | Il codice trattava "qualunque cosa diversa da Crawling/Seeding/Suspended" come Critical per default; `NotApplicable` è invece uno stato normale — tipicamente una copia ritardata (lagged copy, `ReplayLagTime` > 0) che Exchange non indicizza di proposito perché non è pensata per servire ricerche live | Mappatura esplicita per stato (`Failed`/`FailedAndSuspended` → Critical, `Crawling`/`Seeding`/`Suspended`/`Unknown` → Warning, `NotApplicable`/`Disabled` → Info); un valore mai visto prima diventa `Unknown`, non più Critical per default |
 | 15 | Un nodo cluster `Down` reale (incidente su un membro DAG) non risultava da nessuna parte nel report | `Get-ClusterNode` non era disponibile sulla macchina da cui girava lo script (modulo FailoverClusters/RSAT mancante); il controllo era scritto come `if (Test-HcCommand ...) { ... }` senza alcun ramo per il caso "comando non disponibile", quindi l'intero controllo cluster spariva senza lasciare traccia | Aggiunto un `else` che produce un finding `Warning` esplicito quando la capacità manca del tutto, con l'indicazione di quale componente RSAT installare |
+| 16 | `Cannot bind parameter 'ConnectionUri' ... Invalid URI: The hostname could not be parsed` su un check (`ComponentState`) che non costruisce alcun URI | Su un giro lungo (molti server) la sessione remota Exchange (`$script:ExSession`) diventa stale/disconnessa prima che lo script finisca; le funzioni proxy di `Import-PSSession` restano richiamabili anche a sessione morta, e il loro tentativo di riconnessione interna fallisce con un errore di URI che maschera la vera causa | `Test-HcExchangeSessionHealthy`/`Repair-HcExchangeSession` (§3.13): stato reale della sessione verificato e riparato prima dei check Exchange-side di ogni server, non solo all'avvio |
+| 17 | 150 messaggi totali su 12 code (~12,5 a coda, nessuna anomala) segnalati come `Warning` code, l'utente si aspettava l'allarme solo per una singola coda realmente alta | Il finding `TotalMessages` sommava tutte le code del server e lo confrontava con le **stesse** soglie (`QueueWarning`/`QueueCritical`) usate per giudicare una singola coda; tante code piccole sommate superavano la soglia pensata per un'unica coda bloccata | Soglie separate `QueueTotalWarning`/`QueueTotalCritical` (default 300/1000) per il totale-server, distinte da `QueueWarning`/`QueueCritical` che restano invariate per la singola coda |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

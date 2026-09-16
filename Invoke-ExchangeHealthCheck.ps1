@@ -127,6 +127,8 @@ $DefaultConfigJson = @'
     "UptimeMinutesMinimum": 15,
     "QueueWarning": 100,
     "QueueCritical": 500,
+    "QueueTotalWarning": 300,
+    "QueueTotalCritical": 1000,
     "SubmissionQueueWarning": 50,
     "SubmissionQueueCritical": 250,
     "PoisonQueueWarning": 1,
@@ -1762,9 +1764,13 @@ function Invoke-HcQueueCheck {
     $total = 0
     foreach ($q in $realQueues) { $total += [int64]$q.MessageCount }
 
+    # Soglie separate da QueueWarning/QueueCritical: il totale server e la
+    # dimensione di una singola coda misurano cose diverse. Tante code piccole
+    # (es. 150 messaggi su 12 code, ~12 a coda) non sono un problema di posta
+    # in stallo e non devono scattare come se fosse una singola coda bloccata.
     $sev = 'OK'
-    if ($total -ge [int64]$t.QueueCritical) { $sev = 'Critical' }
-    elseif ($total -ge [int64]$t.QueueWarning) { $sev = 'Warning' }
+    if ($total -ge [int64]$t.QueueTotalCritical) { $sev = 'Critical' }
+    elseif ($total -ge [int64]$t.QueueTotalWarning) { $sev = 'Warning' }
     Add-Finding -Category 'Queue' -Server $Target.Name -Item 'TotalMessages' -Severity $sev `
         -Message ('Totale messaggi in coda: {0} su {1} code attive.' -f $total, $realQueues.Count) -Value $total
 

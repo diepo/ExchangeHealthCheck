@@ -47,6 +47,8 @@
 
     "QueueWarning": 100,
     "QueueCritical": 500,
+    "QueueTotalWarning": 300,
+    "QueueTotalCritical": 1000,
     "SubmissionQueueWarning": 50,
     "SubmissionQueueCritical": 250,
     "PoisonQueueWarning": 1,
