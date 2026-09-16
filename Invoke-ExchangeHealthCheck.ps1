@@ -1,3 +1,4 @@
+# Versione script: 1.9.0 (2026-09-16) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
