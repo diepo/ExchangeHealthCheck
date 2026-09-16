@@ -1393,31 +1393,54 @@ function Invoke-HcCopyStatusCheck {
             default                                  { $sev = 'Warning' }
         }
 
-        $copySummaryRows.Add([pscustomobject]@{ Name = [string]$copy.Name; Status = $status; Severity = $sev }) | Out-Null
-
         Add-Finding -Category 'DatabaseCopy' -Server $Target.Name -Item ([string]$copy.Name) -Severity $sev `
             -Message ('Copia {0}: stato {1}{2}.' -f $copy.Name, $status, $(if ($copy.ErrorMessage) { ' - ' + $copy.ErrorMessage } else { '' })) `
             -Value $status
 
         # --- Copy queue / Replay queue
+        # Calcolate sempre (non solo se non-Mounted): lo Status di Exchange
+        # "Healthy" descrive solo che il meccanismo di copia funziona, non che la
+        # copia sia allineata - una copia puo restare "Healthy" con migliaia di
+        # log da riprodurre (replay) ancora in coda. Se la severita di stato da
+        # sola alimentasse i riepiloghi aggregati sotto, un caso cosi passerebbe
+        # per sano (successo davvero con un DB reale: Status Healthy, Replay
+        # queue 8576 - nessun avviso nello specchietto nonostante il finding
+        # ReplayQueue fosse gia Critical tra i Findings).
         $copyQ   = 0
         $replayQ = 0
         if ($null -ne $copy.CopyQueueLength)   { $copyQ   = [int64]$copy.CopyQueueLength }
         if ($null -ne $copy.ReplayQueueLength) { $replayQ = [int64]$copy.ReplayQueueLength }
 
+        $qSev = 'OK'
+        if ($copyQ -ge [int64]$t.CopyQueueCritical) { $qSev = 'Critical' }
+        elseif ($copyQ -ge [int64]$t.CopyQueueWarning) { $qSev = 'Warning' }
+
+        $rSev = 'OK'
+        if ($replayQ -ge [int64]$t.ReplayQueueCritical) { $rSev = 'Critical' }
+        elseif ($replayQ -ge [int64]$t.ReplayQueueWarning) { $rSev = 'Warning' }
+
         if ($status -ne 'Mounted') {
-            $qSev = 'OK'
-            if ($copyQ -ge [int64]$t.CopyQueueCritical) { $qSev = 'Critical' }
-            elseif ($copyQ -ge [int64]$t.CopyQueueWarning) { $qSev = 'Warning' }
             Add-Finding -Category 'CopyQueue' -Server $Target.Name -Item ([string]$copy.Name) -Severity $qSev `
                 -Message ('Copy queue {0} log per {1}.' -f $copyQ, $copy.Name) -Value $copyQ
-
-            $rSev = 'OK'
-            if ($replayQ -ge [int64]$t.ReplayQueueCritical) { $rSev = 'Critical' }
-            elseif ($replayQ -ge [int64]$t.ReplayQueueWarning) { $rSev = 'Warning' }
             Add-Finding -Category 'ReplayQueue' -Server $Target.Name -Item ([string]$copy.Name) -Severity $rSev `
                 -Message ('Replay queue {0} log per {1}.' -f $replayQ, $copy.Name) -Value $replayQ
         }
+
+        # Severita complessiva della copia per i riepiloghi aggregati (per
+        # server e per database) - non tocca la Severity del finding
+        # 'DatabaseCopy' sopra, che resta legata solo allo Status testuale:
+        # il finding 'ReplayQueue'/'CopyQueue' dedicato esiste gia per quello.
+        $copySev = $sev
+        if ((Get-SeverityRank $qSev) -gt (Get-SeverityRank $copySev)) { $copySev = $qSev }
+        if ((Get-SeverityRank $rSev) -gt (Get-SeverityRank $copySev)) { $copySev = $rSev }
+
+        $copySummaryRows.Add([pscustomobject]@{
+            Name              = [string]$copy.Name
+            Status            = $status
+            Severity          = $copySev
+            CopyQueueLength   = $copyQ
+            ReplayQueueLength = $replayQ
+        }) | Out-Null
 
         # --- Content index
         # Mappatura esplicita, non un "tutto il resto e Critical": NotApplicable e
@@ -1453,11 +1476,14 @@ function Invoke-HcCopyStatusCheck {
             DbName               = $dbName
             Server               = $Target.Name
             Status               = $status
-            Severity             = $sev
+            Severity             = $copySev
             ContentIndexState    = $ci
             ContentIndexSeverity = $ciSev
             CopyQueueLength      = $copyQ
+            CopyQueueSeverity    = $qSev
             ReplayQueueLength    = $replayQ
+            ReplayQueueSeverity  = $rSev
+            SuspendComment       = [string]$copy.SuspendComment
         }) | Out-Null
     }
 
@@ -1471,7 +1497,18 @@ function Invoke-HcCopyStatusCheck {
         TotalCopies  = $copySummaryRows.Count
         Healthy      = $copySummaryRows.Count - $notHealthy.Count
         NotHealthy   = $notHealthy.Count
-        ProblemDetail = ($notHealthy | ForEach-Object { '{0}: {1}' -f (($_.Name -split '\\')[0]), $_.Status }) -join '; '
+        # Se lo Status stesso non e "Healthy" mostra quello (es. Seeding,
+        # Suspended): e gia la spiegazione. Se invece lo Status e "Healthy" ma la
+        # riga e comunque marcata NotHealthy, il motivo e nelle code (vedi sopra)
+        # e va detto esplicitamente - altrimenti la riga direbbe "Healthy" pur
+        # essendo evidenziata come problema, che e la confusione originale.
+        ProblemDetail = ($notHealthy | ForEach-Object {
+            $reason = $_.Status
+            if ($_.Status -eq 'Healthy') {
+                $reason = 'Healthy ma code indietro (copy={0}, replay={1})' -f $_.CopyQueueLength, $_.ReplayQueueLength
+            }
+            '{0}: {1}' -f (($_.Name -split '\\')[0]), $reason
+        }) -join '; '
         Severity     = $topSeverity
     }) | Out-Null
 }
@@ -2370,15 +2407,14 @@ function Write-HcDatabaseSummaryConsole {
     foreach ($row in $DatabaseCopySummary) { $grandTotal += [int64]$row.TotalCopies; $grandNotHealthy += [int64]$row.NotHealthy }
 
     Write-Host ("`nCopie database - {0} totali su {1} server, {2} non sane" -f $grandTotal, $DatabaseCopySummary.Count, $grandNotHealthy) -ForegroundColor White
-    $header = '{0,-20} {1,7} {2,8} {3,11} {4,-40}' -f `
+    $header = '{0,-20} {1,7} {2,8} {3,11} {4}' -f `
         'Server', 'Copie', 'Sane', 'Non sane', 'Dettaglio'
     Write-Host $header -ForegroundColor Gray
     Write-Host ('-' * $header.Length) -ForegroundColor Gray
 
     foreach ($row in ($DatabaseCopySummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Server)) {
         $detail = if ($row.ProblemDetail) { $row.ProblemDetail } else { '-' }
-        if ($detail.Length -gt 40) { $detail = $detail.Substring(0, 37) + '...' }
-        $line = '{0,-20} {1,7} {2,8} {3,11} {4,-40}' -f `
+        $line = '{0,-20} {1,7} {2,8} {3,11} {4}' -f `
             $row.Server, $row.TotalCopies, $row.Healthy, $row.NotHealthy, $detail
         Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.Severity)
     }
@@ -2408,17 +2444,27 @@ function Get-HcDatabaseSummary {
         elseif ($active.Count -gt 1 -and (Get-SeverityRank $worstSev) -lt (Get-SeverityRank 'Warning')) { $worstSev = 'Warning' }
 
         # Etichetta per copia: "Server:Active" per la copia montata, altrimenti
-        # lo Status grezzo di Exchange (Healthy/Seeding/Suspended/Failed/...),
-        # che e gia di per se la risposta a "e in sync o no". Il content index
-        # si aggiunge solo quando non e nello stato normale (Healthy/NotApplicable/
-        # Disabled), per non appesantire la riga nel caso comune.
+        # lo Status grezzo di Exchange (Healthy/Seeding/Suspended/Failed/...).
+        # Lo Status da solo pero non basta: una copia puo restare "Healthy" con
+        # migliaia di log da riprodurre ancora in coda (visto su un DB reale:
+        # Status Healthy, ReplayQueueLength 8576) - la replay queue va mostrata
+        # sempre per le copie non attive, non solo quando supera la soglia,
+        # perche e il dato che spiega la severita della riga anche quando lo
+        # Status testuale sembra tranquillo. Copy queue e content index solo
+        # quando non sono nel caso comune, per non appesantire la riga.
         $copyLabels = foreach ($c in ($copies | Sort-Object @{Expression = { $_.Status -ne 'Mounted' }}, Server)) {
             $role = if ($c.Status -eq 'Mounted') { 'Active' } else { $c.Status }
-            $ciSuffix = ''
-            if ($c.ContentIndexState -and $c.ContentIndexState -notin @('Healthy', 'NotApplicable', 'Disabled', '')) {
-                $ciSuffix = ',CI:{0}' -f $c.ContentIndexState
+            $extras = New-Object System.Collections.Generic.List[string]
+            if ($c.Status -ne 'Mounted') {
+                $extras.Add('RQ:{0}' -f $c.ReplayQueueLength) | Out-Null
+                if ([int64]$c.CopyQueueLength -gt 0) { $extras.Add('CQ:{0}' -f $c.CopyQueueLength) | Out-Null }
             }
-            '{0}:{1}{2}' -f $c.Server, $role, $ciSuffix
+            if ($c.ContentIndexState -and $c.ContentIndexState -notin @('Healthy', 'NotApplicable', 'Disabled', '')) {
+                $extras.Add('CI:{0}' -f $c.ContentIndexState) | Out-Null
+            }
+            if ($c.SuspendComment) { $extras.Add('Suspend:"{0}"' -f $c.SuspendComment) | Out-Null }
+            $suffix = if ($extras.Count -gt 0) { ',' + ($extras -join ',') } else { '' }
+            '{0}:{1}{2}' -f $c.Server, $role, $suffix
         }
 
         $rows.Add([pscustomobject]@{

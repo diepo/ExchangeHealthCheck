@@ -463,6 +463,23 @@ nomi reali. La colonna dettaglio copie, inoltre, troncava a 60 caratteri:
 insufficiente con nomi server realistici e 4+ copie per database; il
 troncamento e stato rimosso, la riga si espande a quanto serve.
 
+**Severita che ignorava le code (bug 19)**: la severita per riga (sia
+per-server sia per-database) veniva calcolata solo dallo `Status` testuale
+della copia. Su un DB reale con una copia `Status: Healthy` ma
+`ReplayQueueLength: 8576` (soglia critica di default 100), il finding
+`ReplayQueue` era gia Critical tra i Findings, ma i due riepiloghi aggregati
+mostravano quella riga come sana - `Status: Healthy` di Exchange descrive
+solo che il meccanismo di copia funziona, non che sia allineata. Ora la
+severita di riga e il massimo tra severita di stato, severita copy queue e
+severita replay queue, calcolate sempre (non solo quando il copy e in stato
+diverso da `Mounted`, come accadeva prima per l'emissione dei finding
+dedicati, che restano invariati). Il riepilogo per database mostra inoltre
+sempre `RQ:<valore>` per ogni copia non attiva - non solo quando supera la
+soglia - insieme a `CQ:<valore>` quando diverso da zero e `Suspend:"..."`
+quando la copia riporta un `SuspendComment`: dati diagnostici che l'utente ha
+chiesto esplicitamente dopo aver dovuto controllare `Get-MailboxDatabaseCopyStatus`
+a mano per capire perche una riga "Healthy" nascondesse un problema reale.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -510,6 +527,7 @@ pubblico, cronologici.
 | 16 | `Cannot bind parameter 'ConnectionUri' ... Invalid URI: The hostname could not be parsed` su un check (`ComponentState`) che non costruisce alcun URI | Su un giro lungo (molti server) la sessione remota Exchange (`$script:ExSession`) diventa stale/disconnessa prima che lo script finisca; le funzioni proxy di `Import-PSSession` restano richiamabili anche a sessione morta, e il loro tentativo di riconnessione interna fallisce con un errore di URI che maschera la vera causa | `Test-HcExchangeSessionHealthy`/`Repair-HcExchangeSession` (§3.13): stato reale della sessione verificato e riparato prima dei check Exchange-side di ogni server, non solo all'avvio |
 | 17 | 150 messaggi totali su 12 code (~12,5 a coda, nessuna anomala) segnalati come `Warning` code, l'utente si aspettava l'allarme solo per una singola coda realmente alta | Il finding `TotalMessages` sommava tutte le code del server e lo confrontava con le **stesse** soglie (`QueueWarning`/`QueueCritical`) usate per giudicare una singola coda; tante code piccole sommate superavano la soglia pensata per un'unica coda bloccata | Soglie separate `QueueTotalWarning`/`QueueTotalCritical` (default 300/1000) per il totale-server, distinte da `QueueWarning`/`QueueCritical` che restano invariate per la singola coda |
 | 18 | Riepilogo per database (§3.15) mostrato in un ordine confuso (es. DB12 prima di DB01) e con la colonna "Copie (Server:Stato)" troncata con `...` su ambienti con nomi server lunghi e 4+ copie per database | L'ordinamento era severita-poi-nome (utile per le viste "solo problemi" come code/cluster, fuorviante per un inventario fisso che si scorre sempre allo stesso modo); il confronto per nome era lessicografico puro (`"DB12" < "DB2"` come stringhe); la colonna dettaglio era troncata a 60 caratteri, insufficiente con nomi server realistici (es. `GRPI-EXC-PCxx`) su 4 copie | Ordinamento per solo nome database con `Get-HcNaturalSortKey` (zero-padding delle sequenze numeriche, cosi l'ordine e numerico e non lessicografico); troncamento rimosso, la colonna si espande al contenuto |
+| 19 | Un database reale (DAG5-DB19) aveva una copia con `Status Healthy` ma `ReplayQueueLength 8576` (soglia critica di default 100): il finding `ReplayQueue` era gia Critical tra i Findings, ma sia il riepilogo per server sia quello per database (§3.15) mostravano quella riga come sana, senza alcun segnale | La severita usata nei due riepiloghi aggregati veniva calcolata **solo** dallo Status testuale della copia (`Healthy`/`Seeding`/`Suspended`/...); `Status: Healthy` descrive solo che il meccanismo di copia funziona, non che la copia sia allineata - CopyQueueLength/ReplayQueueLength non entravano mai nel calcolo di quella severita, restavano confinati al loro finding dedicato | La severita per riga (sia per-server sia per-database) e ora il massimo tra severita di stato, severita copy queue e severita replay queue; il `ProblemDetail` per-server mostra esplicitamente "Healthy ma code indietro (copy=X, replay=Y)" invece di limitarsi a ripetere lo Status; il riepilogo per database mostra sempre `RQ:<valore>` per le copie non attive (non solo quando fuori soglia) e aggiunge `Suspend:"..."` quando presente |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

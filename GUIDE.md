@@ -154,7 +154,11 @@ incrociare a mano le righe della vista per server. Se nessuna copia risulta
 attiva, il database compare comunque, marcato Critical. Ordinata per nome
 database (numerico, non alfabetico puro: `DB2` prima di `DB10`), non per
 gravità — è un inventario che si scorre sempre nello stesso ordine, i
-problemi restano comunque visibili dal colore della riga.
+problemi restano comunque visibili dal colore della riga. Per ogni copia non
+attiva mostra sempre la sua replay queue (`RQ:`), la copy queue solo se
+diversa da zero (`CQ:`) e un eventuale commento di sospensione — non solo
+quando superano la soglia, per non dover controllare a mano `Get-MailboxDatabaseCopyStatus`
+ogni volta che una riga sembra sospetta.
 
 **Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
 categorie, server, dettaglio), quando in un giro compare qualcosa di davvero
@@ -274,6 +278,19 @@ quella copia non sta più tenendo il passo (rete lenta, disco saturo, copia in
 seeding). Le soglie sono `Thresholds.CopyQueueWarning`/`CopyQueueCritical` e
 `Thresholds.ReplayQueueWarning`/`ReplayQueueCritical`; non si applicano alla
 copia attiva (`Mounted`), che per definizione non ha nulla da recuperare.
+
+**Una copia mostrata come "Healthy" nel riepilogo per database, ma con un finding Critical su ReplayQueue**
+Non è una contraddizione: lo `Status` di Exchange (`Healthy`) descrive solo
+che il meccanismo di copia funziona correttamente, non che la copia sia
+allineata — può restare `Healthy` anche con migliaia di log di transazione
+ancora da riprodurre (replay) sul database. Bug risolto: nelle versioni
+precedenti la severità mostrata nei riepiloghi (per server e per database)
+guardava solo questo `Status` testuale, ignorando `CopyQueueLength`/
+`ReplayQueueLength` — una copia poteva quindi apparire sana nello specchietto
+pur avendo già un finding `ReplayQueue` Critical tra le anomalie. Dalla
+versione più recente la severità di riga considera anche le code, e il
+dettaglio mostra sempre `RQ:<valore>` per capire subito la causa senza dover
+interrogare `Get-MailboxDatabaseCopyStatus` a mano.
 
 **Content index in stato "NotApplicable"**
 Non è un guasto: è uno stato normale, tipico di una copia database
