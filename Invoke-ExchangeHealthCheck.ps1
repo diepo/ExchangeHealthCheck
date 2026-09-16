@@ -1342,9 +1342,21 @@ function Invoke-HcCopyStatusCheck {
         }
 
         # --- Content index
+        # Mappatura esplicita, non un "tutto il resto e Critical": NotApplicable e
+        # Disabled sono stati normali (tipicamente una copia ritardata - lagged
+        # copy - che non viene indicizzata di proposito, o l'indicizzazione
+        # disattivata volontariamente), non un guasto. Un valore MAI visto prima
+        # diventa Unknown, non Critical: meglio segnalare "non riconosciuto" che
+        # dichiarare un guasto che potrebbe non esserci, come e successo con
+        # NotApplicable.
         $ci = [string]$copy.ContentIndexState
         if ($ci -and $ci -ne 'Healthy') {
-            $ciSev = if ($ci -match '^(Crawling|Seeding|Suspended)$') { 'Warning' } else { 'Critical' }
+            $ciSev = switch -Regex ($ci) {
+                '^(Failed|FailedAndSuspended)$'          { 'Critical' }
+                '^(Crawling|Seeding|Suspended|Unknown)$'  { 'Warning' }
+                '^(NotApplicable|Disabled)$'              { 'Info' }
+                default                                    { 'Unknown' }
+            }
             Add-Finding -Category 'ContentIndex' -Server $Target.Name -Item ([string]$copy.Name) -Severity $ciSev `
                 -Message ('Content index di {0} in stato {1}{2}.' -f $copy.Name, $ci, $(if ($copy.ContentIndexErrorMessage) { ' - ' + $copy.ContentIndexErrorMessage } else { '' })) `
                 -Value $ci
