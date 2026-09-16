@@ -361,6 +361,7 @@ pubblico, cronologici.
 | 11 | Riepilogo per categoria mostrava "25" per `ManagedAvailability` con solo 3 problemi distinti | La stessa anomalia (health set Unhealthy, witness irraggiungibile, certificato in scadenza) viene spesso rilevata identica su più server dello stesso DAG; sommare ogni finding conta una volta per server invece che una volta per problema | Deduplica per `Item`+`Message` insieme (non sul solo `Item`, che avrebbe fatto sparire per errore dischi/code realmente diversi con la stessa etichetta) |
 | 12 | `Cannot convert value ... DisplayHint ... to type System.DateTime` alla lettura dello stato | Sotto **Windows PowerShell 5.1** (non riproducibile in pwsh 7), `Get-Date` chiamato **direttamente** dentro un literal `@{ Chiave = Get-Date }` o assegnato direttamente a una proprietà esistente (`$obj.Prop = Get-Date`) produce un oggetto che `ConvertTo-Json` serializza come `{"value":..., "DisplayHint":2, "DateTime":...}` invece di una data semplice; il cast `[datetime]` al giro successivo fallisce | Passare prima da una variabile (`$now = Get-Date`, poi usare `$now`) o da un cast esplicito `[datetime](Get-Date)`: entrambi verificati sicuri con un test dedicato. Vedi §8 per la regola generale |
 | 13 | Il giro sembrava bloccato indefinitamente; il log mostrava solo l'ultimo check completato (`ManagedAvailability`) senza altro per minuti | In realtà il check *successivo* (`Certificate`) era fermo, non quello loggato per ultimo: la durata si stampa solo a fine check, quindi l'ultimo nome visibile in log durante un blocco non è quello bloccato, è quello appena prima. `Get-ExchangeCertificate` era appeso 300,3s (il timeout RPC di default di Windows) su un server con un problema di backend IIS pre-esistente | `Invoke-HcExchangeWithTimeout` (§3.11): la chiamata gira in un job separato terminabile con forza entro un limite configurabile (default 30s) |
+| 14 | `ContentIndex` segnalato Critical su `NotApplicable` | Il codice trattava "qualunque cosa diversa da Crawling/Seeding/Suspended" come Critical per default; `NotApplicable` è invece uno stato normale — tipicamente una copia ritardata (lagged copy, `ReplayLagTime` > 0) che Exchange non indicizza di proposito perché non è pensata per servire ricerche live | Mappatura esplicita per stato (`Failed`/`FailedAndSuspended` → Critical, `Crawling`/`Seeding`/`Suspended`/`Unknown` → Warning, `NotApplicable`/`Disabled` → Info); un valore mai visto prima diventa `Unknown`, non più Critical per default |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 
@@ -434,6 +435,15 @@ primo tentativo.
   base, **verificare sotto Windows PowerShell 5.1 reale** (`powershell.exe`,
   non solo `pwsh`) prima di dare per buono un fix — i due engine non si
   comportano sempre allo stesso modo, come già successo qui.
+- **Mai un default che dichiara Critical su "qualunque valore non riconosciuto"**
+  per un campo enum-like di Exchange (`ContentIndexState`, `Status` di una
+  copia database, e simili). §5 riga 14: `NotApplicable` — uno stato normale
+  per le copie ritardate — veniva segnalato Critical solo perché non era uno
+  dei pochi valori esplicitamente gestiti come non-Critical. La lista completa
+  dei valori possibili di questi enum non è sempre nota in anticipo (vedi §6):
+  un valore mai visto va verso `Unknown`, mai verso `Critical` per default —
+  un falso allarme costa fiducia nello strumento, un falso silenzio su
+  `Unknown` resta comunque visibile nel report.
 
 ## 9. Se riprendi questo progetto: da dove iniziare
 

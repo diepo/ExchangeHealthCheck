@@ -237,6 +237,13 @@ versione più recente, questi due controlli hanno un limite configurabile
 viene abbandonato e segnato come non riuscito, invece di bloccare il resto del
 giro sugli altri server.
 
+**Content index in stato "NotApplicable"**
+Non è un guasto: è uno stato normale, tipico di una copia database
+**ritardata** (lagged copy — ha un `ReplayLagTime` configurato) che Exchange
+non indicizza di proposito, perché non è pensata per servire ricerche live.
+Aggiorna alla versione più recente: nelle versioni precedenti veniva segnalato
+per errore come Critical.
+
 ## 8. Sicurezza e privacy dei dati
 
 - Lo script non modifica nulla in Exchange: solo cmdlet `Get-*` e `Test-*`.
