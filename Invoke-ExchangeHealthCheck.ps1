@@ -74,6 +74,8 @@ $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
 $script:QueueSummary   = New-Object System.Collections.Generic.List[object]
+$script:ClusterSummary = New-Object System.Collections.Generic.List[object]
+$script:DatabaseCopySummary = New-Object System.Collections.Generic.List[object]
 $script:LogFile        = $null
 $script:ExSession      = $null
 $script:CheckFilter    = $Check
@@ -189,11 +191,15 @@ $DefaultConfigJson = @'
     "SubjectPrefix": "[Exchange Health]",
     "AttachCsv": true,
     "IncludeQueueSummary": true,
+    "IncludeClusterSummary": true,
+    "IncludeDatabaseSummary": true,
     "QueueAlertSubjectTag": "ATTENZIONE CODE",
     "SeparateAlertSubjectTag": "WARNING FOUND"
   },
   "Console": {
     "ShowCategorySummary": true,
+    "ShowClusterSummary": true,
+    "ShowDatabaseSummary": true,
     "ShowQueueSummary": true
   },
   "Paths": {
@@ -1258,6 +1264,20 @@ function Invoke-HcDagCheck {
                         Add-Finding -Category 'Cluster' -Server $dagName -Item 'Nodes' -Severity 'OK' `
                             -Message ('Tutti i {0} nodi cluster sono Up.' -f $cluster.Nodes.Count)
                     }
+
+                    # Fotografia per il riepilogo aggregato "per DAG": stesso
+                    # principio delle code e delle copie database, sempre
+                    # raccolta, non solo quando c'e un problema.
+                    $downNodes = @($cluster.Nodes | Where-Object { [string]$_.State -ne 'Up' })
+                    $script:ClusterSummary.Add([pscustomobject]@{
+                        Dag          = $dagName
+                        TotalNodes   = $cluster.Nodes.Count
+                        NodesUp      = $cluster.Nodes.Count - $downNodes.Count
+                        NodesDown    = $downNodes.Count
+                        DownDetail   = ($downNodes | ForEach-Object { '{0} ({1})' -f $_.Name, $_.State }) -join '; '
+                        Witness      = $witnessState
+                        Severity     = if ($downNodes.Count -gt 0) { 'Critical' } else { 'OK' }
+                    }) | Out-Null
                 }
                 else {
                     # Nessun allarme: lo stato dei membri del DAG e gia verificato
@@ -1266,6 +1286,17 @@ function Invoke-HcDagCheck {
                         -Message ('Stato dei nodi cluster non interrogabile per {0} (verificare RSAT Failover Clustering e i permessi sul cluster). Lo stato dei membri del DAG resta verificato via Exchange.' -f $dagName)
                     Write-HcLog ('Get-ClusterNode non disponibile per {0}: {1}' -f $dagName, $cluster.Error) -Level DEBUG
                 }
+            }
+            else {
+                # Prima capitava che, senza il modulo FailoverClusters (RSAT
+                # "Failover Clustering Tools") installato sulla macchina da cui
+                # gira lo script, questo intero controllo venisse saltato senza
+                # alcuna traccia: ne un errore, ne un finding, ne una riga di log
+                # visibile - un nodo cluster Down sarebbe passato inosservato
+                # silenziosamente. Ora l'assenza della capacita e essa stessa un
+                # finding, cosi non sparisce piu senza lasciare traccia.
+                Add-Finding -Category 'Cluster' -Server $dagName -Item 'Capability' -Severity 'Warning' `
+                    -Message ('Impossibile verificare lo stato dei nodi cluster per {0}: il cmdlet Get-ClusterNode non e disponibile su questa macchina. Installa lo strumento RSAT "Failover Clustering Tools" (Windows Feature RSAT-Clustering-PowerShell) sull''host da cui gira lo script.' -f $dagName)
             }
         }
     }
@@ -1301,6 +1332,11 @@ function Invoke-HcCopyStatusCheck {
         return
     }
 
+    # Fotografia delle copie per il riepilogo aggregato (mail + console), sullo
+    # stesso principio delle code: totale/sane/non sane per server, raccolta
+    # sempre, non solo quando c'e un problema.
+    $copySummaryRows = New-Object System.Collections.Generic.List[object]
+
     foreach ($copy in $copies) {
         $dbName = ([string]$copy.Name -split '\\')[0]
 
@@ -1316,6 +1352,8 @@ function Invoke-HcCopyStatusCheck {
             '^(Failed|FailedAndSuspended|Suspended|ServiceDown|Dismounted|DisconnectedAndResynchronizing|Misconfigured|NotKnown)$' { $sev = 'Critical' }
             default                                  { $sev = 'Warning' }
         }
+
+        $copySummaryRows.Add([pscustomobject]@{ Name = [string]$copy.Name; Status = $status; Severity = $sev }) | Out-Null
 
         Add-Finding -Category 'DatabaseCopy' -Server $Target.Name -Item ([string]$copy.Name) -Severity $sev `
             -Message ('Copia {0}: stato {1}{2}.' -f $copy.Name, $status, $(if ($copy.ErrorMessage) { ' - ' + $copy.ErrorMessage } else { '' })) `
@@ -1366,6 +1404,20 @@ function Invoke-HcCopyStatusCheck {
                 -Message ('Content index di {0} Healthy.' -f $copy.Name) -Value $ci
         }
     }
+
+    $notHealthy = @($copySummaryRows | Where-Object { $_.Severity -ne 'OK' })
+    $topSeverity = 'OK'
+    if (@($notHealthy | Where-Object Severity -eq 'Critical').Count -gt 0) { $topSeverity = 'Critical' }
+    elseif ($notHealthy.Count -gt 0) { $topSeverity = 'Warning' }
+
+    $script:DatabaseCopySummary.Add([pscustomobject]@{
+        Server       = $Target.Name
+        TotalCopies  = $copySummaryRows.Count
+        Healthy      = $copySummaryRows.Count - $notHealthy.Count
+        NotHealthy   = $notHealthy.Count
+        ProblemDetail = ($notHealthy | ForEach-Object { '{0}: {1}' -f (($_.Name -split '\\')[0]), $_.Status }) -join '; '
+        Severity     = $topSeverity
+    }) | Out-Null
 }
 
 function Invoke-HcReplicationCheck {
@@ -2227,12 +2279,60 @@ function Write-HcQueueSummaryConsole {
     Write-Host "(Shadow escluse dai totali: trattengono messaggi per progetto.)`n" -ForegroundColor DarkGray
 }
 
+function Write-HcClusterSummaryConsole {
+    param([object[]]$ClusterSummary)
+
+    if (-not $ClusterSummary -or $ClusterSummary.Count -eq 0) { return }
+
+    Write-Host "`nStato cluster per DAG" -ForegroundColor White
+    $header = '{0,-14} {1,7} {2,8} {3,10} {4,-14} {5,-30}' -f `
+        'DAG', 'Nodi', 'Up', 'Down', 'Witness', 'Nodi non Up'
+    Write-Host $header -ForegroundColor Gray
+    Write-Host ('-' * $header.Length) -ForegroundColor Gray
+
+    foreach ($row in ($ClusterSummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Dag)) {
+        $detail = if ($row.DownDetail) { $row.DownDetail } else { '-' }
+        if ($detail.Length -gt 30) { $detail = $detail.Substring(0, 27) + '...' }
+        $line = '{0,-14} {1,7} {2,8} {3,10} {4,-14} {5,-30}' -f `
+            $row.Dag, $row.TotalNodes, $row.NodesUp, $row.NodesDown, $row.Witness, $detail
+        Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.Severity)
+    }
+    Write-Host ""
+}
+
+function Write-HcDatabaseSummaryConsole {
+    param([object[]]$DatabaseCopySummary)
+
+    if (-not $DatabaseCopySummary -or $DatabaseCopySummary.Count -eq 0) { return }
+
+    $grandTotal = 0
+    $grandNotHealthy = 0
+    foreach ($row in $DatabaseCopySummary) { $grandTotal += [int64]$row.TotalCopies; $grandNotHealthy += [int64]$row.NotHealthy }
+
+    Write-Host ("`nCopie database - {0} totali su {1} server, {2} non sane" -f $grandTotal, $DatabaseCopySummary.Count, $grandNotHealthy) -ForegroundColor White
+    $header = '{0,-20} {1,7} {2,8} {3,11} {4,-40}' -f `
+        'Server', 'Copie', 'Sane', 'Non sane', 'Dettaglio'
+    Write-Host $header -ForegroundColor Gray
+    Write-Host ('-' * $header.Length) -ForegroundColor Gray
+
+    foreach ($row in ($DatabaseCopySummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Server)) {
+        $detail = if ($row.ProblemDetail) { $row.ProblemDetail } else { '-' }
+        if ($detail.Length -gt 40) { $detail = $detail.Substring(0, 37) + '...' }
+        $line = '{0,-20} {1,7} {2,8} {3,11} {4,-40}' -f `
+            $row.Server, $row.TotalCopies, $row.Healthy, $row.NotHealthy, $detail
+        Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.Severity)
+    }
+    Write-Host ""
+}
+
 function New-HcMailBody {
     param(
         [object]$AlertResult,
         [object[]]$AllFindings,
         [object[]]$Targets,
         [object[]]$QueueSummary,
+        [object[]]$ClusterSummary,
+        [object[]]$DatabaseCopySummary,
         [switch]$Heartbeat
     )
 
@@ -2286,6 +2386,69 @@ function New-HcMailBody {
             $dur = if ($rec.Duration) { '{0:N0}h {1:N0}m' -f [math]::Floor($rec.Duration.TotalHours), $rec.Duration.Minutes } else { 'n/d' }
             [void]$sb.AppendLine(("<tr><td style='border:1px solid #dfe4e6;font-weight:600;'>{0}</td><td style='border:1px solid #dfe4e6;'>{1}</td><td style='border:1px solid #dfe4e6;'>{2}</td><td style='border:1px solid #dfe4e6;'>{3}</td><td style='border:1px solid #dfe4e6;color:#7f8c8d;'>{4}</td></tr>" -f
                 (ConvertTo-HcHtmlText $rec.Server), (ConvertTo-HcHtmlText $rec.Category), (ConvertTo-HcHtmlText $rec.Item), $dur, (ConvertTo-HcHtmlText $rec.Message)))
+        }
+        [void]$sb.AppendLine('</table>')
+    }
+
+    # Vista aggregata del cluster per DAG: stesso principio delle code, mostrata
+    # sempre, non solo in presenza di alert - conferma anche quando va tutto bene.
+    $clusters = @($ClusterSummary)
+    if ($clusters.Count -gt 0 -and $script:Config.Mail.IncludeClusterSummary) {
+        [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:22px 0 6px 0;'>Stato cluster per DAG</h3>")
+        [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
+        [void]$sb.AppendLine("<tr style='background:#f4f6f7;text-align:left;'>" +
+            "<th style='border:1px solid #dfe4e6;'>DAG</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Nodi</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Up</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Down</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Witness</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Nodi non Up</th></tr>")
+
+        foreach ($row in ($clusters | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Dag)) {
+            $color = Get-HcSeverityColor $row.Severity
+            $downStyle = if ([int64]$row.NodesDown -gt 0) { "color:#c0392b;font-weight:600;" } else { '' }
+            $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;border-left:4px solid {0};'>{1}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;'>{2}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;'>{3}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;{4}'>{5}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{6}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{7}</td></tr>"
+            $downDetail = if ($row.DownDetail) { $row.DownDetail } else { '-' }
+            $html = $template -f $color, (ConvertTo-HcHtmlText $row.Dag), $row.TotalNodes, $row.NodesUp,
+                                 $downStyle, $row.NodesDown, (ConvertTo-HcHtmlText $row.Witness), (ConvertTo-HcHtmlText $downDetail)
+            [void]$sb.AppendLine($html)
+        }
+        [void]$sb.AppendLine('</table>')
+    }
+
+    # Vista aggregata delle copie database per server: idem, stesso principio.
+    $dbCopies = @($DatabaseCopySummary)
+    if ($dbCopies.Count -gt 0 -and $script:Config.Mail.IncludeDatabaseSummary) {
+        $totalCopies = 0
+        $totalNotHealthy = 0
+        foreach ($row in $dbCopies) { $totalCopies += [int64]$row.TotalCopies; $totalNotHealthy += [int64]$row.NotHealthy }
+
+        [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:22px 0 6px 0;'>Copie database - $totalCopies totali, $totalNotHealthy non sane</h3>")
+        [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
+        [void]$sb.AppendLine("<tr style='background:#f4f6f7;text-align:left;'>" +
+            "<th style='border:1px solid #dfe4e6;'>Server</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Copie</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Sane</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Non sane</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Dettaglio</th></tr>")
+
+        foreach ($row in ($dbCopies | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Server)) {
+            $color = Get-HcSeverityColor $row.Severity
+            $notHealthyStyle = if ([int64]$row.NotHealthy -gt 0) { "color:#c0392b;font-weight:600;" } else { '' }
+            $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;border-left:4px solid {0};'>{1}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;'>{2}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;'>{3}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;{4}'>{5}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{6}</td></tr>"
+            $detail = if ($row.ProblemDetail) { $row.ProblemDetail } else { '-' }
+            $html = $template -f $color, (ConvertTo-HcHtmlText $row.Server), $row.TotalCopies, $row.Healthy,
+                                 $notHealthyStyle, $row.NotHealthy, (ConvertTo-HcHtmlText $detail)
+            [void]$sb.AppendLine($html)
         }
         [void]$sb.AppendLine('</table>')
     }
@@ -2634,6 +2797,14 @@ try {
         Write-HcCategorySummaryConsole -Findings $allFindings
     }
 
+    if ($script:Config.Console.ShowClusterSummary) {
+        Write-HcClusterSummaryConsole -ClusterSummary $script:ClusterSummary.ToArray()
+    }
+
+    if ($script:Config.Console.ShowDatabaseSummary) {
+        Write-HcDatabaseSummaryConsole -DatabaseCopySummary $script:DatabaseCopySummary.ToArray()
+    }
+
     if ($script:Config.Console.ShowQueueSummary) {
         Write-HcQueueSummaryConsole -QueueSummary $script:QueueSummary.ToArray()
     }
@@ -2686,7 +2857,9 @@ try {
     $mailSent = $false
     if ($shouldSend) {
         $isHeartbeat = ($toNotify.Count -eq 0 -and -not $sendRecovery)
-        $body = New-HcMailBody -AlertResult $alerts -AllFindings $allFindings -Targets $targets -QueueSummary $script:QueueSummary.ToArray() -Heartbeat:$isHeartbeat
+        $body = New-HcMailBody -AlertResult $alerts -AllFindings $allFindings -Targets $targets `
+            -QueueSummary $script:QueueSummary.ToArray() -ClusterSummary $script:ClusterSummary.ToArray() `
+            -DatabaseCopySummary $script:DatabaseCopySummary.ToArray() -Heartbeat:$isHeartbeat
 
         $criticalCount = @($toNotify | Where-Object { $_.Severity -eq 'Critical' }).Count
         $warningCount  = @($toNotify | Where-Object { $_.Severity -in @('Warning','Unknown') }).Count

@@ -169,12 +169,16 @@
     "SubjectPrefix": "[Exchange Health]",
     "AttachCsv": true,
     "IncludeQueueSummary": true,
+    "IncludeClusterSummary": true,
+    "IncludeDatabaseSummary": true,
     "QueueAlertSubjectTag": "ATTENZIONE CODE",
     "SeparateAlertSubjectTag": "WARNING FOUND"
   },
 
   "Console": {
     "ShowCategorySummary": true,
+    "ShowClusterSummary": true,
+    "ShowDatabaseSummary": true,
     "ShowQueueSummary": true
   },
 
