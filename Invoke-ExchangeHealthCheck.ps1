@@ -470,6 +470,40 @@ function Invoke-HcExchangeWithTimeout {
     }
 }
 
+# Su un giro lungo (molti server), la sessione remota di Exchange aperta
+# all'inizio puo diventare stale/disconnessa (timeout di idle di WinRM o
+# dell'endpoint Exchange) ben prima che lo script finisca. Import-PSSession
+# lascia pero le funzioni proxy nella sessione corrente anche quando la
+# sessione remota sottostante non e piu viva: i cmdlet Exchange sembrano
+# ancora "disponibili" (Test-HcCommand li trova), ma la prima chiamata reale
+# fallisce con un errore che sembra un problema di rete/URI (i cmdlet proxy
+# tentano una riconnessione interna e quella e a fallire), non l'errore
+# originale del cmdlet stesso - da qui la sua natura fuorviante.
+function Test-HcExchangeSessionHealthy {
+    # Non rilevante quando si usa lo snap-in locale: in quel caso $script:ExSession
+    # resta $null e non esiste una sessione remota che possa diventare stale.
+    if (-not $script:ExSession) { return $true }
+    return ([string]$script:ExSession.State -eq 'Opened')
+}
+
+function Repair-HcExchangeSession {
+    Write-HcLog 'La sessione Exchange remota non risulta piu aperta: la richiudo e ne apro una nuova.' -Level WARN
+
+    try { Remove-PSSession -Session $script:ExSession -ErrorAction SilentlyContinue } catch { }
+    $script:ExSession = $null
+
+    $target = [string]$script:Config.Organization.ConnectTo
+    if ([string]::IsNullOrWhiteSpace($target)) {
+        throw 'Impossibile ristabilire la sessione Exchange: Organization.ConnectTo non valorizzato nella configurazione.'
+    }
+
+    $uri = 'http://{0}/PowerShell/' -f $target
+    $script:ExSession = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri $uri `
+        -Authentication Kerberos -ErrorAction Stop
+    Import-PSSession -Session $script:ExSession -DisableNameChecking -AllowClobber -ErrorAction Stop | Out-Null
+    Write-HcLog 'Sessione Exchange ristabilita.'
+}
+
 function Connect-HcExchange {
     if (Test-HcCommand 'Get-ExchangeServer') {
         Write-HcLog 'Cmdlet Exchange gia disponibili nella sessione corrente.'
@@ -2769,6 +2803,20 @@ try {
                 continue
             }
             Write-HcLog ('{0} non raggiungibile via WinRM: proseguo comunque con i check Exchange-side.' -f $target.Name) -Level WARN
+        }
+
+        # Su un giro lungo, la sessione Exchange remota puo diventare stale prima
+        # che si arrivi a questo server: verificato qui, non solo all'avvio, cosi
+        # un giro su decine di server non si porta dietro una sessione morta senza
+        # accorgersene - il sintomo altrimenti e un errore fuorviante tipo "Cannot
+        # convert value ... to type Uri" su un check che non c'entra nulla con la
+        # rete (i cmdlet proxy tentano una riconnessione interna e falliscono li).
+        if (-not (Test-HcExchangeSessionHealthy)) {
+            try { Repair-HcExchangeSession }
+            catch {
+                Write-HcLog ('Impossibile ristabilire la sessione Exchange: {0}. Salto i check Exchange-side per {1}.' -f $_.Exception.Message, $target.Name) -Level ERROR
+                continue
+            }
         }
 
         if (Test-CheckEnabled 'Components')   { Invoke-HcCheck -Category 'ComponentState'      -ServerName $target.Name -Body { Invoke-HcComponentCheck   -Target $target } }
