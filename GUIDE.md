@@ -299,15 +299,22 @@ non indicizza di proposito, perché non è pensata per servire ricerche live.
 Aggiorna alla versione più recente: nelle versioni precedenti veniva segnalato
 per errore come Critical.
 
-**"Check non eseguibile sotto ComponentState — Cannot bind parameter 'ConnectionUri' ... hostname could not be parsed"**
-Non è un problema di rete o DNS, anche se l'errore lo sembra. Su un giro
-lungo con molti server, la sessione remota verso Exchange può diventare stale
-(scaduta per inattività) prima che lo script finisca; a quel punto un comando
-qualsiasi verso Exchange scatena un tentativo di riconnessione automatica
-interno che fallisce con questo errore fuorviante. Dalla versione più recente
-lo script verifica lo stato della sessione prima dei controlli Exchange di
-ogni server e la ricrea da solo quando serve: se lo vedi ancora, aggiorna alla
-versione più recente.
+**"Check non eseguibile — Cannot bind parameter 'ConnectionUri' ... hostname could not be parsed"**
+Non è un problema di rete o DNS, anche se l'errore lo sembra: è la sessione
+Exchange verso cui lo script sta lavorando che è caduta, e il tentativo di
+riconnessione automatica interno di Exchange fallisce con questo errore
+fuorviante che non c'entra nulla con l'operazione richiesta. Dalla versione
+più recente, quando lo script rileva questo sintomo pulisce la sessione
+caduta, prova a riconnettersi e ripete il check una volta sola — sia che la
+sessione l'avesse aperta lo script stesso (`Organization.ConnectTo`
+configurato), sia che tu stia eseguendo lo script dentro una Exchange
+Management Shell o una sessione aperta a mano con `Connect-ExchangeServer`/
+`RemoteExchange.ps1` già aperta prima di lanciarlo. Se vedi ancora l'errore
+dopo l'aggiornamento, il finding `Unknown` te lo dice esplicitamente: in
+quel caso la sessione era genuinamente esterna e senza `Organization.ConnectTo`
+configurato né lo snap-in locale registrato lo script non ha modo di
+ricrearla da solo — riapri la sessione Exchange (nuova Exchange Management
+Shell o `Connect-ExchangeServer`) e rilancia lo script.
 
 **Il totale messaggi in coda di un server segnala "Warning" ma nessuna coda singola sembra alta**
 Bug risolto: il totale sommava tutte le code del server (anche tante code

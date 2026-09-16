@@ -480,6 +480,43 @@ quando la copia riporta un `SuspendComment`: dati diagnostici che l'utente ha
 chiesto esplicitamente dopo aver dovuto controllare `Get-MailboxDatabaseCopyStatus`
 a mano per capire perche una riga "Healthy" nascondesse un problema reale.
 
+### 3.16 Recupero reattivo, origin-agnostic, di una sessione Exchange caduta
+
+Il fix §3.13 (`Test-HcExchangeSessionHealthy`/`Repair-HcExchangeSession`) presuppone che
+sia questo script ad aver aperto la sessione remota, tracciata in
+`$script:ExSession`. Un utente senza `Organization.ConnectTo` configurato
+(caso comune: lo script gira dentro una Exchange Management Shell, o dentro
+una sessione aperta a mano con `Connect-ExchangeServer`/`RemoteExchange.ps1`
+**prima** di lanciare lo script) ha riportato lo stesso identico sintomo
+**dopo** il fix §3.13: `Connect-HcExchange` trova i cmdlet Exchange gia
+disponibili (`Test-HcCommand 'Get-ExchangeServer'` vero) e non fa nulla,
+quindi `$script:ExSession` resta `$null` per l'intero giro. Lo script non ha
+alcuna visibilita sulla sessione esterna: non puo sapere quando cade, non
+puo ripararla per riferimento perche non la possiede.
+
+**Fix, in `Invoke-HcCheck`** (il wrapper centrale che gia isola le eccezioni
+di ogni check): il corpo del check viene ora eseguito dentro un try/catch
+interno che riconosce il sintomo per **impronta del messaggio di errore**
+(`Test-HcStaleExchangeSessionSymptom`: contiene `'ConnectionUri'` e `Uri`),
+non per provenienza della sessione. Se riconosciuto, `Remove-HcStaleExchangeProxy`
+ripulisce gli artefatti **a prescindere da chi li abbia creati**: rimuove
+ogni `PSSession` non `Opened` trovata con `Get-PSSession`, chiude
+`$script:ExSession` se tracciata, e soprattutto rimuove per nome (via
+`Get-Module | Where-Object { $_.ExportedCommands.ContainsKey('Get-ExchangeServer') }`)
+qualunque modulo di implicit remoting esponga quel cmdlet — che sia stato
+generato da `Connect-HcExchange` o da un `Connect-ExchangeServer` lanciato a
+mano dall'utente, il modulo proxy che ne risulta espone gli stessi nomi di
+cmdlet ed e indistinguibile. Dopo la pulizia, `Test-HcCommand 'Get-ExchangeServer'`
+torna correttamente falso (il modulo non c'e piu), quindi un secondo
+`Connect-HcExchange` tenta per davvero una riconnessione (snap-in se
+registrato, `Organization.ConnectTo` se valorizzato) invece di limitarsi a
+constatare "gia disponibile". Il check viene poi rieseguito **una sola
+volta**: se va a buon fine il giro prosegue senza alcun finding; se fallisce
+di nuovo (nessuna via di riconnessione disponibile: ne snap-in ne ConnectTo,
+la sessione era genuinamente esterna e non recuperabile da questo script),
+il finding `Unknown` risultante lo dice esplicitamente, invece di ripetere
+l'errore di URI fuorviante per ogni check successivo dell'intero giro.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -528,6 +565,7 @@ pubblico, cronologici.
 | 17 | 150 messaggi totali su 12 code (~12,5 a coda, nessuna anomala) segnalati come `Warning` code, l'utente si aspettava l'allarme solo per una singola coda realmente alta | Il finding `TotalMessages` sommava tutte le code del server e lo confrontava con le **stesse** soglie (`QueueWarning`/`QueueCritical`) usate per giudicare una singola coda; tante code piccole sommate superavano la soglia pensata per un'unica coda bloccata | Soglie separate `QueueTotalWarning`/`QueueTotalCritical` (default 300/1000) per il totale-server, distinte da `QueueWarning`/`QueueCritical` che restano invariate per la singola coda |
 | 18 | Riepilogo per database (§3.15) mostrato in un ordine confuso (es. DB12 prima di DB01) e con la colonna "Copie (Server:Stato)" troncata con `...` su ambienti con nomi server lunghi e 4+ copie per database | L'ordinamento era severita-poi-nome (utile per le viste "solo problemi" come code/cluster, fuorviante per un inventario fisso che si scorre sempre allo stesso modo); il confronto per nome era lessicografico puro (`"DB12" < "DB2"` come stringhe); la colonna dettaglio era troncata a 60 caratteri, insufficiente con nomi server realistici (es. `GRPI-EXC-PCxx`) su 4 copie | Ordinamento per solo nome database con `Get-HcNaturalSortKey` (zero-padding delle sequenze numeriche, cosi l'ordine e numerico e non lessicografico); troncamento rimosso, la colonna si espande al contenuto |
 | 19 | Un database reale (DAG5-DB19) aveva una copia con `Status Healthy` ma `ReplayQueueLength 8576` (soglia critica di default 100): il finding `ReplayQueue` era gia Critical tra i Findings, ma sia il riepilogo per server sia quello per database (§3.15) mostravano quella riga come sana, senza alcun segnale | La severita usata nei due riepiloghi aggregati veniva calcolata **solo** dallo Status testuale della copia (`Healthy`/`Seeding`/`Suspended`/...); `Status: Healthy` descrive solo che il meccanismo di copia funziona, non che la copia sia allineata - CopyQueueLength/ReplayQueueLength non entravano mai nel calcolo di quella severita, restavano confinati al loro finding dedicato | La severita per riga (sia per-server sia per-database) e ora il massimo tra severita di stato, severita copy queue e severita replay queue; il `ProblemDetail` per-server mostra esplicitamente "Healthy ma code indietro (copy=X, replay=Y)" invece di limitarsi a ripetere lo Status; il riepilogo per database mostra sempre `RQ:<valore>` per le copie non attive (non solo quando fuori soglia) e aggiunge `Suspend:"..."` quando presente |
+| 20 | Il fix §3.13 (stale-session repair) non risolveva il sintomo per un utente con `Organization.ConnectTo` **non configurato**: `Cannot bind parameter 'ConnectionUri' ... hostname could not be parsed` continuava a presentarsi identico dopo il fix | §3.13 traccia e ripara solo `$script:ExSession`, popolata unicamente quando e `Connect-HcExchange` (di questo script) ad aprire la sessione remota. Ma se `Organization.ConnectTo` non serve perche lo script gira dentro una Exchange Management Shell o una sessione aperta a mano con `Connect-ExchangeServer`/`RemoteExchange.ps1` **prima** di lanciare lo script, `Test-HcCommand 'Get-ExchangeServer'` trova i cmdlet gia disponibili, `Connect-HcExchange` non fa nulla, e `$script:ExSession` resta `$null` per l'intero giro: lo script non ha alcuna visibilita sulla sessione esterna e non puo mai sapere che e caduta | §3.16: recupero reattivo e origin-agnostic in `Invoke-HcCheck`, che non dipende dal tracciare una sessione specifica |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

@@ -405,7 +405,26 @@ function Invoke-HcCheck {
     )
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        & $Body
+        try {
+            & $Body
+        }
+        catch {
+            if (-not (Test-HcStaleExchangeSessionSymptom -ErrorRecord $_)) { throw }
+
+            # Non si distingue qui tra "sessione aperta da questo script" e
+            # "sessione esterna gia presente quando lo script e partito": la
+            # pulizia e origin-agnostic (vedi Remove-HcStaleExchangeProxy),
+            # cosi il tentativo di recupero funziona in entrambi i casi.
+            Write-HcLog ('Check {0} [{1}]: sintomo di sessione Exchange caduta ({2}). Pulisco e riprovo a riconnettermi.' -f $Category, $ServerName, $_.Exception.Message) -Level WARN
+            Remove-HcStaleExchangeProxy
+            try {
+                Connect-HcExchange
+                & $Body
+            }
+            catch {
+                throw ('sessione Exchange non recuperabile ({0}). Se lo script gira dentro una Exchange Management Shell o una sessione aperta a mano con Connect-ExchangeServer, quella sessione e caduta: va riaperta manualmente, lo script non puo ricrearla da solo senza Organization.ConnectTo configurato.' -f $_.Exception.Message)
+            }
+        }
     }
     catch {
         Add-Finding -Category $Category -Server $ServerName -Item 'CheckExecution' -Severity 'Unknown' `
@@ -490,6 +509,50 @@ function Test-HcExchangeSessionHealthy {
     # resta $null e non esiste una sessione remota che possa diventare stale.
     if (-not $script:ExSession) { return $true }
     return ([string]$script:ExSession.State -eq 'Opened')
+}
+
+# Riconosce il sintomo, non la causa: questo testo esatto viene emesso dal
+# modulo di implicit remoting generato da Import-PSSession quando tenta da
+# solo una riconnessione interna e fallisce - qualunque cmdlet Exchange puo
+# produrlo, l'errore non ha nulla a che vedere con l'operazione richiesta.
+function Test-HcStaleExchangeSessionSymptom {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+    if (-not $ErrorRecord) { return $false }
+    $msg = [string]$ErrorRecord.Exception.Message
+    return ($msg -match "'ConnectionUri'" -and $msg -match 'Uri')
+}
+
+# Ripulisce gli artefatti di una sessione Exchange caduta, a prescindere da
+# chi l'abbia aperta. $script:ExSession copre solo il caso in cui e stato
+# questo script (via Connect-HcExchange) ad aprirla con Organization.ConnectTo
+# valorizzato. Ma se lo script gira dentro una Exchange Management Shell o
+# una sessione aperta a mano con Connect-ExchangeServer/RemoteExchange.ps1
+# PRIMA di lanciarlo - il caso in cui Organization.ConnectTo resta vuoto
+# perche non serve - $script:ExSession e sempre $null e questo script non ha
+# alcuna visibilita su quella sessione: non puo saperla stale, non puo
+# ripararla per nome. Le funzioni proxy che Import-PSSession lascia nella
+# sessione sono pero identiche in entrambi i casi (stessi nomi di cmdlet
+# esportati), quindi la pulizia si fa per IMPRONTA del modulo, non per
+# riferimento alla sessione che lo ha creato.
+function Remove-HcStaleExchangeProxy {
+    try {
+        Get-PSSession -ErrorAction SilentlyContinue |
+            Where-Object { $_.State -ne 'Opened' } |
+            Remove-PSSession -ErrorAction SilentlyContinue
+    }
+    catch { }
+
+    if ($script:ExSession) {
+        try { Remove-PSSession -Session $script:ExSession -ErrorAction SilentlyContinue } catch { }
+        $script:ExSession = $null
+    }
+
+    try {
+        Get-Module -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExportedCommands.ContainsKey('Get-ExchangeServer') } |
+            Remove-Module -Force -ErrorAction SilentlyContinue
+    }
+    catch { }
 }
 
 function Repair-HcExchangeSession {
