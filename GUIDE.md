@@ -316,6 +316,20 @@ configurato né lo snap-in locale registrato lo script non ha modo di
 ricrearla da solo — riapri la sessione Exchange (nuova Exchange Management
 Shell o `Connect-ExchangeServer`) e rilancia lo script.
 
+**"Access is denied" su `Get-Queue` comparso su tutti i server, dopo aver visto l'errore sopra**
+Bug risolto, causato proprio dal fix precedente: in un ambiente senza
+`Organization.ConnectTo` (sessione Exchange già aperta da una Exchange
+Management Shell o da `Connect-ExchangeServer`), i controlli Certificate e
+ManagedAvailability girano in un processo separato con un timeout duro
+(protezione contro cmdlet Exchange che restano appesi) che **non eredita**
+quella sessione esterna — quindi falliva sempre, non per una sessione
+davvero caduta. Il recupero pensato per le sessioni cadute veniva innescato
+comunque, e ripuliva per errore anche il modulo Exchange valido della
+sessione esterna, condiviso con tutti gli altri check. Aggiorna alla
+versione più recente: quei due controlli ora, in questa configurazione,
+girano diretti senza passare dal processo separato (perdendo solo la
+protezione da timeout duro per loro due, non il resto).
+
 **Il totale messaggi in coda di un server segnala "Warning" ma nessuna coda singola sembra alta**
 Bug risolto: il totale sommava tutte le code del server (anche tante code
 piccole, ciascuna con pochi messaggi) e lo confrontava con la stessa soglia

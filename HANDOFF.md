@@ -319,6 +319,30 @@ sano — accettabile per due chiamate isolate per server, non pensato per
 essere applicato a ogni singolo cmdlet Exchange dello script senza
 valutazione caso per caso.
 
+**Fallback quando il job non può autenticarsi da solo (bug 21)**: il job
+gira in un processo nuovo che non eredita nulla del processo principale —
+se non trova né lo snap-in locale né `Organization.ConnectTo` valorizzato,
+non ha alcun modo di accedere a Exchange, a differenza del processo
+principale che può avere i cmdlet disponibili tramite una sessione esterna
+già aperta (Exchange Management Shell, o `Connect-ExchangeServer`/
+`RemoteExchange.ps1` lanciati a mano prima di avviare lo script — proprio il
+motivo per cui `Organization.ConnectTo` non serve in quel caso). In quella
+configurazione il job falliva **sempre**, per ogni chiamata a
+`Get-ExchangeCertificate`/`Get-HealthReport`/`Get-ServerHealth`, con
+`Cannot bind parameter 'ConnectionUri'` — non un sintomo di sessione stale
+ma un fallimento strutturale e deterministico, che però innescava
+inutilmente (e distruttivamente, vedi §3.16) il recupero pensato per
+sessioni davvero cadute: `Remove-HcStaleExchangeProxy` rimuoveva il modulo
+Exchange condiviso, valido, della sessione esterna, lasciando il resto del
+giro a lavorare su una sessione a metà smontata (`Access is denied` sparso
+su check che non c'entravano nulla, es. `Get-Queue`). Fix: quando né
+snap-in né `ConnectTo` sono disponibili, `Invoke-HcExchangeWithTimeout`
+salta del tutto il job e chiama il cmdlet **direttamente nel processo
+corrente**, dove i cmdlet sono già disponibili — perdendo la protezione da
+timeout duro per queste chiamate specifiche in questa configurazione, ma
+evitando un fallimento garantito e la distruzione collaterale della sessione
+di lavoro.
+
 ### 3.12 Riepiloghi aggregati: cluster per DAG e copie database per server
 
 Stesso principio della vista aggregata delle code (§3.9): una fotografia
@@ -574,6 +598,7 @@ pubblico, cronologici.
 | 18 | Riepilogo per database (§3.15) mostrato in un ordine confuso (es. DB12 prima di DB01) e con la colonna "Copie (Server:Stato)" troncata con `...` su ambienti con nomi server lunghi e 4+ copie per database | L'ordinamento era severita-poi-nome (utile per le viste "solo problemi" come code/cluster, fuorviante per un inventario fisso che si scorre sempre allo stesso modo); il confronto per nome era lessicografico puro (`"DB12" < "DB2"` come stringhe); la colonna dettaglio era troncata a 60 caratteri, insufficiente con nomi server realistici (es. `GRPI-EXC-PCxx`) su 4 copie | Ordinamento per solo nome database con `Get-HcNaturalSortKey` (zero-padding delle sequenze numeriche, cosi l'ordine e numerico e non lessicografico); troncamento rimosso, la colonna si espande al contenuto |
 | 19 | Un database reale (DAG5-DB19) aveva una copia con `Status Healthy` ma `ReplayQueueLength 8576` (soglia critica di default 100): il finding `ReplayQueue` era gia Critical tra i Findings, ma sia il riepilogo per server sia quello per database (§3.15) mostravano quella riga come sana, senza alcun segnale | La severita usata nei due riepiloghi aggregati veniva calcolata **solo** dallo Status testuale della copia (`Healthy`/`Seeding`/`Suspended`/...); `Status: Healthy` descrive solo che il meccanismo di copia funziona, non che la copia sia allineata - CopyQueueLength/ReplayQueueLength non entravano mai nel calcolo di quella severita, restavano confinati al loro finding dedicato | La severita per riga (sia per-server sia per-database) e ora il massimo tra severita di stato, severita copy queue e severita replay queue; il `ProblemDetail` per-server mostra esplicitamente "Healthy ma code indietro (copy=X, replay=Y)" invece di limitarsi a ripetere lo Status; il riepilogo per database mostra sempre `RQ:<valore>` per le copie non attive (non solo quando fuori soglia) e aggiunge `Suspend:"..."` quando presente |
 | 20 | Il fix §3.13 (stale-session repair) non risolveva il sintomo per un utente con `Organization.ConnectTo` **non configurato**: `Cannot bind parameter 'ConnectionUri' ... hostname could not be parsed` continuava a presentarsi identico dopo il fix | §3.13 traccia e ripara solo `$script:ExSession`, popolata unicamente quando e `Connect-HcExchange` (di questo script) ad aprire la sessione remota. Ma se `Organization.ConnectTo` non serve perche lo script gira dentro una Exchange Management Shell o una sessione aperta a mano con `Connect-ExchangeServer`/`RemoteExchange.ps1` **prima** di lanciare lo script, `Test-HcCommand 'Get-ExchangeServer'` trova i cmdlet gia disponibili, `Connect-HcExchange` non fa nulla, e `$script:ExSession` resta `$null` per l'intero giro: lo script non ha alcuna visibilita sulla sessione esterna e non puo mai sapere che e caduta | §3.16: recupero reattivo e origin-agnostic in `Invoke-HcCheck`, che non dipende dal tracciare una sessione specifica |
+| 21 | Dopo il fix del bug 20, `Access is denied` comparso su `Get-Queue` su **tutti** i server (prima non succedeva), e `ManagedAvailability` diventato lento, nello stesso ambiente senza `Organization.ConnectTo` | Il fix del bug 20 riconosce il sintomo per impronta del messaggio ovunque compaia, ma `Invoke-HcExchangeWithTimeout` (usata da Certificate/ManagedAvailability/Get-ServerHealth) lo produce **sempre**, deterministicamente, in un ambiente senza ConnectTo ne snap-in: il job che apre gira in un processo nuovo che non eredita la sessione esterna del processo principale, quindi non ha modo di autenticarsi da solo. Il recupero del bug 20, innescato da questo fallimento strutturale (non da una sessione davvero stale), rimuoveva il modulo Exchange condiviso e valido della sessione esterna - da cui `Access is denied` su `Get-Queue` e altri check che non c'entravano nulla con Certificate/ManagedAvailability, e la lentezza (ogni job impiega secondi per fallire nel modo sbagliato) | Quando ne snap-in ne ConnectTo sono disponibili, `Invoke-HcExchangeWithTimeout` salta il job e chiama il cmdlet diretto nel processo corrente (§3.11), dove i cmdlet della sessione esterna sono gia disponibili: il fallimento deterministico non si presenta piu, quindi il recupero del bug 20 non viene piu innescato da questa causa |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

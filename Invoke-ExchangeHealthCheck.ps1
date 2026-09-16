@@ -463,6 +463,24 @@ function Invoke-HcExchangeWithTimeout {
     $connectTo = [string]$script:Config.Organization.ConnectTo
     $useSnapIn = [bool](Get-PSSnapin -Name 'Microsoft.Exchange.Management.PowerShell.SnapIn' -ErrorAction SilentlyContinue)
 
+    # Ne snap-in ne ConnectTo: il job (processo nuovo, non eredita nulla del
+    # processo principale) non ha alcun modo di autenticarsi da solo - non e
+    # un caso limite raro, e la situazione normale di chi lancia lo script
+    # dentro una Exchange Management Shell o una sessione gia aperta a mano
+    # con Connect-ExchangeServer/RemoteExchange.ps1, dove i cmdlet sono
+    # disponibili senza che lo script sappia come replicarne l'accesso in un
+    # processo separato. In quel caso il job fallirebbe SEMPRE, per ogni
+    # chiamata, con lo stesso "Cannot bind parameter ConnectionUri" - non un
+    # sintomo di sessione stale ma un fallimento strutturale e deterministico
+    # che innescava inutilmente (e distruttivamente: vedi Remove-HcStaleExchangeProxy
+    # in Invoke-HcCheck) il recupero pensato per sessioni davvero cadute.
+    # Qui si rinuncia al timeout duro e si esegue diretto nel processo
+    # corrente, dove i cmdlet SONO gia disponibili: un compromesso preferibile
+    # al fallire sempre.
+    if (-not $useSnapIn -and [string]::IsNullOrWhiteSpace($connectTo)) {
+        return & $CommandName @Parameters
+    }
+
     $jobScript = {
         param($ConnectTo, $UseSnapIn, $CommandName, $Parameters)
         if ($UseSnapIn) {
