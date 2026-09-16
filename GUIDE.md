@@ -144,6 +144,15 @@ per server** (quante sane, quante no, con il dettaglio). Raccolte sempre,
 non solo quando c'è un problema — così vedi subito se un nodo è `Down` o una
 copia è `Failed`/`Seeding` senza dover interrogare manualmente ogni server.
 
+**Riepilogo per database.** Oltre alla vista per server, una vista dedicata
+per **database**: per ciascuno, su quale server è la copia attiva (`Active`),
+e per ogni altra copia il suo stato grezzo di Exchange (`Healthy` = in sync,
+`Seeding`/`Suspended`/`Failed`/... = no), con l'indicazione del content index
+solo quando non è nello stato normale. Risponde direttamente a "questo
+database, chi lo serve adesso, e le altre copie sono allineate?" senza dover
+incrociare a mano le righe della vista per server. Se nessuna copia risulta
+attiva, il database compare comunque, marcato Critical.
+
 **Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
 categorie, server, dettaglio), quando in un giro compare qualcosa di davvero
 nuovo o peggiorato ne parte una seconda, minimale, con oggetto **"WARNING
@@ -250,6 +259,18 @@ versione più recente, questi due controlli hanno un limite configurabile
 `Thresholds.ManagedAvailabilityTimeoutSeconds`): oltre quel limite il check
 viene abbandonato e segnato come non riuscito, invece di bloccare il resto del
 giro sugli altri server.
+
+**Cos'è la "replay queue" (e la "copy queue")?**
+Sono la misura di quanto una copia passiva di un database è indietro rispetto
+a quella attiva. La **copy queue** conta i log di transazione già copiati sul
+disco della copia passiva ma non ancora presenti nel suo storage vero e
+proprio; la **replay queue** conta quelli già copiati **e** riprodotti
+(replayed) nel database, cioè effettivamente applicati. In un DAG sano
+entrambe oscillano vicino a zero — un valore che sale e resta alto indica che
+quella copia non sta più tenendo il passo (rete lenta, disco saturo, copia in
+seeding). Le soglie sono `Thresholds.CopyQueueWarning`/`CopyQueueCritical` e
+`Thresholds.ReplayQueueWarning`/`ReplayQueueCritical`; non si applicano alla
+copia attiva (`Mounted`), che per definizione non ha nulla da recuperare.
 
 **Content index in stato "NotApplicable"**
 Non è un guasto: è uno stato normale, tipico di una copia database

@@ -412,6 +412,43 @@ usate solo per il finding aggregato `TotalMessages`; `QueueWarning`/
 soglia `QueueSubjectThreshold` usata per l'oggetto mail "ATTENZIONE CODE" e
 per l'innesco della mail urgente, che è un meccanismo indipendente.
 
+### 3.15 Riepilogo per database (chi è attivo, chi è passivo, chi è indietro)
+
+Richiesto dall'utente dopo aver visto il riepilogo copie-per-server (§3.12):
+utile per capire quante copie non sono sane su un server, ma non risponde
+alla domanda più naturale — "questo database, su chi è montato in questo
+momento, e le altre copie sono allineate?" — senza incrociare a mano le righe
+di più server.
+
+**Perché non basta iterare `Invoke-HcCopyStatusCheck`**: quella funzione gira
+una volta per server con `Get-MailboxDatabaseCopyStatus -Server X`, che
+restituisce solo le copie *ospitate su quel server*. Nessuna singola chiamata
+vede l'intero quadro di un database (tutte le sue copie, su tutti i server).
+
+**Fix**: ogni copia esaminata da `Invoke-HcCopyStatusCheck` viene anche
+registrata, grezza, in `$script:DatabaseCopyDetail` (Server/Status/Severity/
+ContentIndexState/CopyQueueLength/ReplayQueueLength). Solo a fine giro, dopo
+che tutti i server sono stati processati, `Get-HcDatabaseSummary` raggruppa
+quei dati per nome database e produce, per ciascuno: il server con la copia
+`Mounted` (etichettata `Active`), l'elenco di tutte le copie con il loro
+`Status` grezzo di Exchange (che è già la risposta a "è in sync?" — `Healthy`
+= sì, `Seeding`/`Suspended`/`Failed` = no), e un suffisso `CI:<stato>` solo
+quando il content index di quella copia non è nello stato normale (Healthy/
+NotApplicable/Disabled), per non appesantire la riga nel caso comune.
+
+Due casi limite gestiti esplicitamente: **nessuna copia montata** (il
+database non è servibile da nessun server) → `Severity` forzata a `Critical`
+anche se ogni singola copia risultasse `Healthy` presa da sola; **più di una
+copia montata** (anomalia che Exchange stesso non dovrebbe permettere, ma i
+dati raccolti potrebbero rifletterla in una finestra di transizione) → almeno
+`Warning`, con entrambi i server elencati e un'etichetta esplicita.
+
+Vista aggiunta sia in console (`Write-HcDatabasePerDbSummaryConsole`,
+gate `Console.ShowDatabasePerDbSummary`) sia in mail (sezione "Stato per
+database", gate `Mail.IncludeDatabasePerDbSummary`), subito dopo la vista
+per-server esistente. Non sostituisce quella vista: le due rispondono a
+domande diverse (salute di un server vs. salute di un database).
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -425,11 +462,11 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
-| `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary`, `ShowQueueSummary` |
+| `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary` (per server), `ShowDatabasePerDbSummary` (per database, §3.15), `ShowQueueSummary` |
 | `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets, Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
 | `ExtraServices` | Servizi non-Exchange da includere nel check Services (es. W3SVC, WinRM) |
 | `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare |
-| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12) |
+| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12), `IncludeDatabasePerDbSummary` (§3.15) |
 | `Paths` | Cartelle di log/report/stato, retention |
 
 ## 5. Bug reali trovati durante il test su ambiente vero — con causa e fix

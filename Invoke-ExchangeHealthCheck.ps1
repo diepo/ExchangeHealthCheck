@@ -76,6 +76,8 @@ $script:Findings       = New-Object System.Collections.Generic.List[object]
 $script:QueueSummary   = New-Object System.Collections.Generic.List[object]
 $script:ClusterSummary = New-Object System.Collections.Generic.List[object]
 $script:DatabaseCopySummary = New-Object System.Collections.Generic.List[object]
+$script:DatabaseCopyDetail  = New-Object System.Collections.Generic.List[object]
+$script:DatabaseSummary     = @()
 $script:LogFile        = $null
 $script:ExSession      = $null
 $script:CheckFilter    = $Check
@@ -195,6 +197,7 @@ $DefaultConfigJson = @'
     "IncludeQueueSummary": true,
     "IncludeClusterSummary": true,
     "IncludeDatabaseSummary": true,
+    "IncludeDatabasePerDbSummary": true,
     "QueueAlertSubjectTag": "ATTENZIONE CODE",
     "SeparateAlertSubjectTag": "WARNING FOUND"
   },
@@ -202,6 +205,7 @@ $DefaultConfigJson = @'
     "ShowCategorySummary": true,
     "ShowClusterSummary": true,
     "ShowDatabaseSummary": true,
+    "ShowDatabasePerDbSummary": true,
     "ShowQueueSummary": true
   },
   "Paths": {
@@ -1424,6 +1428,7 @@ function Invoke-HcCopyStatusCheck {
         # dichiarare un guasto che potrebbe non esserci, come e successo con
         # NotApplicable.
         $ci = [string]$copy.ContentIndexState
+        $ciSev = 'OK'
         if ($ci -and $ci -ne 'Healthy') {
             $ciSev = switch -Regex ($ci) {
                 '^(Failed|FailedAndSuspended)$'          { 'Critical' }
@@ -1439,6 +1444,21 @@ function Invoke-HcCopyStatusCheck {
             Add-Finding -Category 'ContentIndex' -Server $Target.Name -Item ([string]$copy.Name) -Severity 'OK' `
                 -Message ('Content index di {0} Healthy.' -f $copy.Name) -Value $ci
         }
+
+        # Dettaglio grezzo per copia: alimenta il riepilogo per-database (non per
+        # server) costruito a fine giro, quando le copie di tutti i server sono
+        # note - una singola chiamata -Server X vede solo le copie ospitate su
+        # quel server, non l'intero quadro di un database.
+        $script:DatabaseCopyDetail.Add([pscustomobject]@{
+            DbName               = $dbName
+            Server               = $Target.Name
+            Status               = $status
+            Severity             = $sev
+            ContentIndexState    = $ci
+            ContentIndexSeverity = $ciSev
+            CopyQueueLength      = $copyQ
+            ReplayQueueLength    = $replayQ
+        }) | Out-Null
     }
 
     $notHealthy = @($copySummaryRows | Where-Object { $_.Severity -ne 'OK' })
@@ -2365,6 +2385,73 @@ function Write-HcDatabaseSummaryConsole {
     Write-Host ""
 }
 
+function Get-HcDatabaseSummary {
+    param([object[]]$CopyDetail)
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    if (-not $CopyDetail -or $CopyDetail.Count -eq 0) { return $rows.ToArray() }
+
+    foreach ($group in ($CopyDetail | Group-Object DbName)) {
+        $copies = @($group.Group)
+        $active = @($copies | Where-Object { $_.Status -eq 'Mounted' })
+
+        $activeServer = '(nessuna)'
+        if ($active.Count -eq 1) { $activeServer = $active[0].Server }
+        elseif ($active.Count -gt 1) { $activeServer = ('{0} (piu di una attiva!)' -f ($active.Server -join ', ')) }
+
+        $worstSev = 'OK'
+        foreach ($c in $copies) {
+            if ((Get-SeverityRank $c.Severity) -gt (Get-SeverityRank $worstSev)) { $worstSev = $c.Severity }
+            if ((Get-SeverityRank $c.ContentIndexSeverity) -gt (Get-SeverityRank $worstSev)) { $worstSev = $c.ContentIndexSeverity }
+        }
+        if ($active.Count -eq 0) { $worstSev = 'Critical' }
+        elseif ($active.Count -gt 1 -and (Get-SeverityRank $worstSev) -lt (Get-SeverityRank 'Warning')) { $worstSev = 'Warning' }
+
+        # Etichetta per copia: "Server:Active" per la copia montata, altrimenti
+        # lo Status grezzo di Exchange (Healthy/Seeding/Suspended/Failed/...),
+        # che e gia di per se la risposta a "e in sync o no". Il content index
+        # si aggiunge solo quando non e nello stato normale (Healthy/NotApplicable/
+        # Disabled), per non appesantire la riga nel caso comune.
+        $copyLabels = foreach ($c in ($copies | Sort-Object @{Expression = { $_.Status -ne 'Mounted' }}, Server)) {
+            $role = if ($c.Status -eq 'Mounted') { 'Active' } else { $c.Status }
+            $ciSuffix = ''
+            if ($c.ContentIndexState -and $c.ContentIndexState -notin @('Healthy', 'NotApplicable', 'Disabled', '')) {
+                $ciSuffix = ',CI:{0}' -f $c.ContentIndexState
+            }
+            '{0}:{1}{2}' -f $c.Server, $role, $ciSuffix
+        }
+
+        $rows.Add([pscustomobject]@{
+            DbName       = $group.Name
+            ActiveServer = $activeServer
+            CopyCount    = $copies.Count
+            CopyDetail   = ($copyLabels -join '; ')
+            Severity     = $worstSev
+        }) | Out-Null
+    }
+
+    return $rows.ToArray()
+}
+
+function Write-HcDatabasePerDbSummaryConsole {
+    param([object[]]$DatabaseSummary)
+
+    if (-not $DatabaseSummary -or $DatabaseSummary.Count -eq 0) { return }
+
+    Write-Host ("`nStato per database - {0} database" -f $DatabaseSummary.Count) -ForegroundColor White
+    $header = '{0,-24} {1,-20} {2,6} {3,-60}' -f 'Database', 'Attivo su', 'Copie', 'Copie (Server:Stato)'
+    Write-Host $header -ForegroundColor Gray
+    Write-Host ('-' * $header.Length) -ForegroundColor Gray
+
+    foreach ($row in ($DatabaseSummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, DbName)) {
+        $detail = $row.CopyDetail
+        if ($detail.Length -gt 60) { $detail = $detail.Substring(0, 57) + '...' }
+        $line = '{0,-24} {1,-20} {2,6} {3,-60}' -f $row.DbName, $row.ActiveServer, $row.CopyCount, $detail
+        Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.Severity)
+    }
+    Write-Host ""
+}
+
 function New-HcMailBody {
     param(
         [object]$AlertResult,
@@ -2373,6 +2460,7 @@ function New-HcMailBody {
         [object[]]$QueueSummary,
         [object[]]$ClusterSummary,
         [object[]]$DatabaseCopySummary,
+        [object[]]$DatabaseSummary,
         [switch]$Heartbeat
     )
 
@@ -2488,6 +2576,34 @@ function New-HcMailBody {
             $detail = if ($row.ProblemDetail) { $row.ProblemDetail } else { '-' }
             $html = $template -f $color, (ConvertTo-HcHtmlText $row.Server), $row.TotalCopies, $row.Healthy,
                                  $notHealthyStyle, $row.NotHealthy, (ConvertTo-HcHtmlText $detail)
+            [void]$sb.AppendLine($html)
+        }
+        [void]$sb.AppendLine('</table>')
+    }
+
+    # Vista aggregata per database (non per server): chi e la copia attiva,
+    # stato di ogni copia passiva (sana/in seeding/sospesa/failed). Risponde
+    # direttamente a "questo DB su chi e attivo, e sincronizzato?" senza dover
+    # incrociare a mano le righe per-server sopra.
+    $dbPerDb = @($DatabaseSummary)
+    if ($dbPerDb.Count -gt 0 -and $script:Config.Mail.IncludeDatabasePerDbSummary) {
+        [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:22px 0 6px 0;'>Stato per database ($($dbPerDb.Count))</h3>")
+        [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
+        [void]$sb.AppendLine("<tr style='background:#f4f6f7;text-align:left;'>" +
+            "<th style='border:1px solid #dfe4e6;'>Database</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Attivo su</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Copie</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Stato copie (Server:Stato)</th></tr>")
+
+        foreach ($row in ($dbPerDb | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, DbName)) {
+            $color = Get-HcSeverityColor $row.Severity
+            $activeStyle = if ($row.ActiveServer -eq '(nessuna)') { "color:#c0392b;font-weight:600;" } else { '' }
+            $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;border-left:4px solid {0};'>{1}</td>" +
+                "<td style='border:1px solid #dfe4e6;{2}'>{3}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;'>{4}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{5}</td></tr>"
+            $html = $template -f $color, (ConvertTo-HcHtmlText $row.DbName), $activeStyle,
+                                 (ConvertTo-HcHtmlText $row.ActiveServer), $row.CopyCount, (ConvertTo-HcHtmlText $row.CopyDetail)
             [void]$sb.AppendLine($html)
         }
         [void]$sb.AppendLine('</table>')
@@ -2842,6 +2958,13 @@ try {
     if (Test-CheckEnabled 'Dag')       { Invoke-HcDagCheck -Targets $targets }
     if (Test-CheckEnabled 'Databases') { Invoke-HcCheck -Category 'Database' -Body { Invoke-HcDatabaseCheck -Targets $targets } }
 
+    # Riepilogo per-database: puo essere costruito solo ora, quando le copie
+    # raccolte -Server per -Server su tutti i target sono note per intero -
+    # una singola chiamata vede solo le copie ospitate su quel server, non il
+    # quadro completo di ogni database (chi e attivo, chi e passivo, chi e
+    # indietro).
+    $script:DatabaseSummary = Get-HcDatabaseSummary -CopyDetail $script:DatabaseCopyDetail.ToArray()
+
     $allFindings = $script:Findings.ToArray()
     $critical = @($allFindings | Where-Object { $_.Severity -eq 'Critical' })
     $warning  = @($allFindings | Where-Object { $_.Severity -in @('Warning','Unknown') })
@@ -2857,6 +2980,10 @@ try {
 
     if ($script:Config.Console.ShowDatabaseSummary) {
         Write-HcDatabaseSummaryConsole -DatabaseCopySummary $script:DatabaseCopySummary.ToArray()
+    }
+
+    if ($script:Config.Console.ShowDatabasePerDbSummary) {
+        Write-HcDatabasePerDbSummaryConsole -DatabaseSummary $script:DatabaseSummary
     }
 
     if ($script:Config.Console.ShowQueueSummary) {
@@ -2913,7 +3040,8 @@ try {
         $isHeartbeat = ($toNotify.Count -eq 0 -and -not $sendRecovery)
         $body = New-HcMailBody -AlertResult $alerts -AllFindings $allFindings -Targets $targets `
             -QueueSummary $script:QueueSummary.ToArray() -ClusterSummary $script:ClusterSummary.ToArray() `
-            -DatabaseCopySummary $script:DatabaseCopySummary.ToArray() -Heartbeat:$isHeartbeat
+            -DatabaseCopySummary $script:DatabaseCopySummary.ToArray() -DatabaseSummary $script:DatabaseSummary `
+            -Heartbeat:$isHeartbeat
 
         $criticalCount = @($toNotify | Where-Object { $_.Severity -eq 'Critical' }).Count
         $warningCount  = @($toNotify | Where-Object { $_.Severity -in @('Warning','Unknown') }).Count

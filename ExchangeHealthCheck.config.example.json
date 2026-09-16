@@ -173,6 +173,7 @@
     "IncludeQueueSummary": true,
     "IncludeClusterSummary": true,
     "IncludeDatabaseSummary": true,
+    "IncludeDatabasePerDbSummary": true,
     "QueueAlertSubjectTag": "ATTENZIONE CODE",
     "SeparateAlertSubjectTag": "WARNING FOUND"
   },
@@ -181,6 +182,7 @@
     "ShowCategorySummary": true,
     "ShowClusterSummary": true,
     "ShowDatabaseSummary": true,
+    "ShowDatabasePerDbSummary": true,
     "ShowQueueSummary": true
   },
 
