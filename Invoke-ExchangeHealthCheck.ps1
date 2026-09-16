@@ -138,6 +138,9 @@ $DefaultConfigJson = @'
     "CertExpiryDaysWarning": 30,
     "CertExpiryDaysCritical": 7,
 
+    "CertificateCheckTimeoutSeconds": 30,
+    "ManagedAvailabilityTimeoutSeconds": 30,
+
     "QueueSubjectThreshold": 200,
     "ThrottleLimit": 24,
     "RemoteOpenTimeoutSeconds": 20,
@@ -146,7 +149,8 @@ $DefaultConfigJson = @'
   "VolumeOverrides": [],
   "HealthReport": {
     "IncludeFailingMonitors": true,
-    "MaxMonitorsPerHealthSet": 5
+    "MaxMonitorsPerHealthSet": 5,
+    "MonitorDetailTimeoutSeconds": 30
   },
   "Queues": {
     "ResolveNextHopHostnames": true,
@@ -404,6 +408,61 @@ function Invoke-HcCheck {
 #endregion
 
 #region ------------------------------------------------------- EXCHANGE ACCESS
+
+# Alcuni cmdlet Exchange (Get-ExchangeCertificate, Get-HealthReport,
+# Get-ServerHealth) non espongono alcun parametro di timeout: se il servizio a cui
+# fanno RPC su un server e lento o inceppato, restano appesi finche non risponde -
+# capitato con Get-ExchangeCertificate fermo per 300s (il timeout RPC di default di
+# Windows), bloccando l'intero giro su tutti gli altri server in coda.
+#
+# Un job separato (processo powershell.exe indipendente) puo essere terminato con
+# forza se supera il limite, cosa che una chiamata diretta nella stessa sessione
+# non permette. Il job deve pero riottenere l'accesso a Exchange da solo: parte in
+# un processo nuovo che non eredita ne lo snap-in ne la sessione remota gia aperti
+# nel processo principale - lo stesso identico percorso a due vie di
+# Connect-HcExchange viene rifatto li dentro.
+function Invoke-HcExchangeWithTimeout {
+    param(
+        [Parameter(Mandatory)][string]$CommandName,
+        [hashtable]$Parameters = @{},
+        [Parameter(Mandatory)][string]$Description,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $connectTo = [string]$script:Config.Organization.ConnectTo
+    $useSnapIn = [bool](Get-PSSnapin -Name 'Microsoft.Exchange.Management.PowerShell.SnapIn' -ErrorAction SilentlyContinue)
+
+    $jobScript = {
+        param($ConnectTo, $UseSnapIn, $CommandName, $Parameters)
+        if ($UseSnapIn) {
+            Add-PSSnapin -Name 'Microsoft.Exchange.Management.PowerShell.SnapIn' -ErrorAction Stop
+        }
+        else {
+            $uri = 'http://{0}/PowerShell/' -f $ConnectTo
+            $session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri $uri `
+                -Authentication Kerberos -ErrorAction Stop
+            Import-PSSession -Session $session -DisableNameChecking -AllowClobber -ErrorAction Stop | Out-Null
+        }
+        & $CommandName @Parameters
+    }
+
+    $job = Start-Job -ScriptBlock $jobScript -ArgumentList $connectTo, $useSnapIn, $CommandName, $Parameters
+    try {
+        if (Wait-Job -Job $job -Timeout $TimeoutSeconds) {
+            return Receive-Job -Job $job -ErrorAction Stop
+        }
+        else {
+            throw ('Timeout dopo {0}s: {1} non ha risposto (il servizio target e probabilmente inceppato).' -f $TimeoutSeconds, $Description)
+        }
+    }
+    finally {
+        # Stop-Job termina il processo del job anche se e ancora appeso in attesa
+        # dell'RPC: e proprio il motivo per cui questa chiamata gira in un job e
+        # non nella sessione principale, dove non ci sarebbe modo di interromperla.
+        Stop-Job -Job $job -ErrorAction SilentlyContinue
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+}
 
 function Connect-HcExchange {
     if (Test-HcCommand 'Get-ExchangeServer') {
@@ -993,9 +1052,18 @@ function Get-HcHealthSetDetail {
     $maximum = [int]$script:Config.HealthReport.MaxMonitorsPerHealthSet
     if ($maximum -le 0) { $maximum = 5 }
 
+    # Timeout piu corto di Get-HealthReport: questa e una chiamata di arricchimento
+    # (il dettaglio dei monitor), non il dato principale, e puo ripetersi una volta
+    # per ogni health set non sano sullo stesso server - meglio un limite basso qui
+    # che sommare piu timeout lunghi in sequenza sullo stesso server.
+    $detailTimeout = [int]$script:Config.HealthReport.MonitorDetailTimeoutSeconds
+    if ($detailTimeout -le 0) { $detailTimeout = 30 }
+
     try {
-        $monitors = @(Get-ServerHealth -Identity $ServerName -HealthSet $HealthSetName -ErrorAction Stop |
-            Where-Object { $_.AlertValue -and $_.AlertValue -ne 'Healthy' -and $_.AlertValue -ne 'Disabled' })
+        $allMonitors = @(Invoke-HcExchangeWithTimeout -CommandName 'Get-ServerHealth' `
+            -Parameters @{ Identity = $ServerName; HealthSet = $HealthSetName; ErrorAction = 'Stop' } `
+            -Description ('Get-ServerHealth su {0}/{1}' -f $ServerName, $HealthSetName) -TimeoutSeconds $detailTimeout)
+        $monitors = @($allMonitors | Where-Object { $_.AlertValue -and $_.AlertValue -ne 'Healthy' -and $_.AlertValue -ne 'Disabled' })
     }
     catch {
         Write-HcLog ('Dettaglio monitor di {0} su {1} non disponibile: {2}' -f $HealthSetName, $ServerName, $_.Exception.Message) -Level DEBUG
@@ -1024,7 +1092,11 @@ function Invoke-HcHealthCheck {
     if (-not (Test-HcCommand 'Get-HealthReport')) { return }
 
     $ignore = @($script:Config.Ignore.HealthSets)
-    $report = @(Get-HealthReport -Identity $Target.Name -ErrorAction Stop)
+    $maTimeout = [int]$script:Config.Thresholds.ManagedAvailabilityTimeoutSeconds
+    if ($maTimeout -le 0) { $maTimeout = 30 }
+    $report = @(Invoke-HcExchangeWithTimeout -CommandName 'Get-HealthReport' `
+        -Parameters @{ Identity = $Target.Name; ErrorAction = 'Stop' } `
+        -Description ('Get-HealthReport su {0}' -f $Target.Name) -TimeoutSeconds $maTimeout)
 
     # Get-HealthReport espone il nome dell'health set in "Name" e l'orario in
     # "LastTransitionTime"; "HealthSetName" e "FirstAlertObservedTime" sono invece
@@ -1730,7 +1802,11 @@ function Invoke-HcCertificateCheck {
     if (-not (Test-HcCommand 'Get-ExchangeCertificate')) { return }
 
     $t = $script:Config.Thresholds
-    $certs = @(Get-ExchangeCertificate -Server $Target.Name -ErrorAction Stop)
+    $certTimeout = [int]$script:Config.Thresholds.CertificateCheckTimeoutSeconds
+    if ($certTimeout -le 0) { $certTimeout = 30 }
+    $certs = @(Invoke-HcExchangeWithTimeout -CommandName 'Get-ExchangeCertificate' `
+        -Parameters @{ Server = $Target.Name; ErrorAction = 'Stop' } `
+        -Description ('Get-ExchangeCertificate su {0}' -f $Target.Name) -TimeoutSeconds $certTimeout)
     $relevant = @($certs | Where-Object { [string]$_.Services -match 'IIS|SMTP|IMAP|POP' })
 
     foreach ($cert in $relevant) {

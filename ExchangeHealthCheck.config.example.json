@@ -63,6 +63,9 @@
     "CertExpiryDaysWarning": 30,
     "CertExpiryDaysCritical": 7,
 
+    "CertificateCheckTimeoutSeconds": 30,
+    "ManagedAvailabilityTimeoutSeconds": 30,
+
     "QueueSubjectThreshold": 200,
 
     "ThrottleLimit": 24,
@@ -105,7 +108,8 @@
 
   "HealthReport": {
     "IncludeFailingMonitors": true,
-    "MaxMonitorsPerHealthSet": 5
+    "MaxMonitorsPerHealthSet": 5,
+    "MonitorDetailTimeoutSeconds": 30
   },
   "Queues": {
     "ResolveNextHopHostnames": true,
