@@ -16,6 +16,7 @@ Repository: https://github.com/diepo/ExchangeHealthCheck
 | Connettività | Server raggiungibile via WinRM/CIM |
 | Sistema operativo | Uptime, reboot in sospeso, memoria, CPU |
 | Disco | Spazio libero su ogni volume, incluse le mount point senza lettera |
+| Dischi fisici | Stato di salute di ogni disco (`Get-PhysicalDisk`): Healthy/Warning/Unhealthy |
 | Servizi | Servizi Exchange fermi che dovrebbero essere in esecuzione |
 | Componenti | Server lasciato in maintenance mode dopo un patching |
 | Managed Availability | Health set non sani, con i monitor coinvolti in dettaglio |
@@ -159,6 +160,20 @@ attiva mostra sempre la sua replay queue (`RQ:`), la copy queue solo se
 diversa da zero (`CQ:`) e un eventuale commento di sospensione — non solo
 quando superano la soglia, per non dover controllare a mano `Get-MailboxDatabaseCopyStatus`
 ogni volta che una riga sembra sospetta.
+
+**Riepilogo dischi fisici.** Una riga per ogni disco fisico di ogni server
+(`Get-PhysicalDisk`): modello, tipo, dimensione, stato di salute e stato
+operativo. Nato da un caso reale: un database restava indietro con la
+replay queue bloccata a migliaia di log mentre gli altri sullo stesso
+server stavano bene — la causa era un disco fisico degradato, visibile solo
+aprendo Server Manager, non da alcun sintomo del database stesso. Su uno
+storage **JBOD** (un disco dedicato per database, niente RAID sui volumi
+dati — la ridondanza la dà già il DAG) un disco che degrada colpisce
+esattamente un database, lasciando sani tutti gli altri: questa vista lo
+rende visibile subito, senza dover indovinare quale sia la causa da un
+sintomo indiretto. In console i dischi non sani vengono mostrati in cima
+(qui l'obiettivo è vedere subito i pochi problemi su un server che può
+avere decine di dischi, non scorrere un inventario fisso).
 
 **Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
 categorie, server, dettaglio), quando in un giro compare qualcosa di davvero

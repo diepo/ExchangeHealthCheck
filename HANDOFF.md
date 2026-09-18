@@ -549,6 +549,49 @@ subito dopo il log "sessione Exchange caduta". La chiamata usa `*> $null`
 SilentlyContinue` da solo non basta, perché quell'output non passa dallo
 stream di errore.
 
+### 3.17 Check dischi fisici (`Get-PhysicalDisk`) e riepilogo dedicato
+
+Nato da un incidente reale: un database (DAG5-DB19) aveva il replay queue
+bloccato a ~9600 log mentre altri 9 database sullo stesso server restavano
+sani. La causa, trovata solo guardando Server Manager, era un singolo disco
+fisico in stato degradato — l'ambiente usa storage **JBOD** (un disco SAS
+dedicato per database, niente RAID sui volumi dati: la ridondanza la
+fornisce già il DAG) su server fisici (Lenovo SR650 V3), non storage
+condiviso/di rete. In un layout così, un disco che degrada colpisce
+esattamente il database che ci vive sopra — un sintomo che a lungo sembra
+"un problema di quel database" e non "il server ha un disco da sostituire",
+finché qualcuno non apre Server Manager o `Get-PhysicalDisk` per caso.
+
+**Raccolta**: `Get-PhysicalDisk` è stato aggiunto allo stesso fan-out remoto
+già esistente per OS/volumi/servizi (`Get-HcRemoteData`, §"RACCOLTA DATI
+OS") — non apre una connessione remota aggiuntiva, riusa quella già in corso
+per server. Se il modulo `Storage` non è disponibile (raro, ma possibile su
+configurazioni minimali) degrada in silenzio a un array vuoto, senza far
+fallire l'intero fan-out.
+
+**Severità**: `HealthStatus` mappato esplicitamente — `Healthy` → OK,
+`Warning` → Warning, `Unhealthy` → Critical, qualunque valore non
+riconosciuto → Unknown (stessa filosofia di `ContentIndexState` in §5 riga
+14: mai un default che dichiara Critical su un valore mai visto). Il finding
+viene emesso per **ogni** disco, incluso quelli sani — coerente con il
+principio già usato per code/cluster/database: la fotografia serve anche
+quando conferma che va tutto bene, non solo quando c'è un problema.
+
+**Riepilogo dedicato** (`$script:PhysicalDiskSummary`, popolato dentro
+`Invoke-HcPhysicalDiskCheck`): una riga per disco con server, ID, modello,
+tipo (SSD/HDD), dimensione, stato di salute e stato operativo — in console
+ordinato per severità (i pochi dischi malati in cima, a differenza del
+riepilogo per database che resta in ordine fisso: qui su un server con
+decine di dischi l'obiettivo è vedere subito i pochi problemi, non scorrere
+un inventario). Vista aggiunta anche in mail, sezione "Dischi fisici", subito
+dopo quella per-database.
+
+**Nuovo check**: `PhysicalDisk`, aggiunto al `ValidateSet` del parametro
+`-Check` e a `Checks.PhysicalDisk` (default `true`) — indipendente da `Disk`
+(che resta il check sui volumi/spazio libero, §3 "CHECK DISK"): sono due
+livelli diversi, un volume pieno e un disco fisico degradato sono due
+problemi distinti anche se a volte collegati.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -557,16 +600,16 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 |---|---|
 | `Organization` | Nome, server a cui connettersi (`ConnectTo`, usato solo se non si è già in Exchange Management Shell), `ViewEntireForest`, rilevamento/override del domain controller |
 | `Servers` | Perimetro (`Include`/`Exclude`/`SiteFilter`/`IncludeEdge`), `UseFqdnForRemoting`, `SkipExchangeChecksWhenOffline` |
-| `Checks` | Un booleano per famiglia di controllo (Os, Disk, Services, Components, Health, Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi) |
+| `Checks` | Un booleano per famiglia di controllo (Os, Disk, PhysicalDisk (§3.17), Services, Components, Health, Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi) |
 | `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code (`QueueWarning`/`QueueCritical` per singola coda, `QueueTotalWarning`/`QueueTotalCritical` per il totale-server, §3.14), copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
-| `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary` (per server), `ShowDatabasePerDbSummary` (per database, §3.15), `ShowQueueSummary` |
+| `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary` (per server), `ShowDatabasePerDbSummary` (per database, §3.15), `ShowPhysicalDiskSummary` (§3.17), `ShowQueueSummary` |
 | `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets, Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
 | `ExtraServices` | Servizi non-Exchange da includere nel check Services (es. W3SVC, WinRM) |
 | `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare |
-| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12), `IncludeDatabasePerDbSummary` (§3.15) |
+| `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12), `IncludeDatabasePerDbSummary` (§3.15), `IncludePhysicalDiskSummary` (§3.17) |
 | `Paths` | Cartelle di log/report/stato, retention |
 
 ## 5. Bug reali trovati durante il test su ambiente vero — con causa e fix

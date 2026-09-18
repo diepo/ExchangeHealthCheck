@@ -1,4 +1,4 @@
-# Versione script: 1.9.0 (2026-09-16) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.10.0 (2026-09-18) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -9,6 +9,7 @@
       - raggiungibilita' dei server (WinRM/CIM) e uptime
       - servizi Exchange (Win32_Service + Test-ServiceHealth)
       - spazio disco incluse mount point (Win32_Volume)
+      - salute dischi fisici (Get-PhysicalDisk: Healthy/Warning/Unhealthy)
       - memoria / CPU / reboot pending
       - ServerComponentState (server rimasti in maintenance mode)
       - Managed Availability (Get-HealthReport)
@@ -29,8 +30,9 @@
     Limita l'esecuzione ai server indicati (wildcard ammesse). Sovrascrive la config.
 
 .PARAMETER Check
-    Esegue solo i check indicati. Valori: Os, Disk, Services, Components, Health,
-    Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi.
+    Esegue solo i check indicati. Valori: Os, Disk, PhysicalDisk, Services,
+    Components, Health, Dag, Replication, Databases, Queues, BackPressure,
+    Certificates, Mapi.
 
 .PARAMETER NoMail
     Esegue i controlli e scrive log/report ma non invia e-mail.
@@ -56,20 +58,19 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.9.0 (2026-09-16)
-    Ultimo aggiornamento: Invoke-HcExchangeWithTimeout non spegne piu la sessione
-    Exchange esterna (Exchange Management Shell / Connect-ExchangeServer) quando
-    ne snap-in ne Organization.ConnectTo sono disponibili - vedi HANDOFF.md §3.11
-    (bug 21) per il dettaglio completo. La versione compare anche come prima
-    riga di log di ogni esecuzione: e il modo piu veloce per verificare se la
-    macchina su cui giri lo script ha davvero l'ultimo aggiornamento.
+    Versione script: 1.10.0 (2026-09-18)
+    Ultimo aggiornamento: nuovo check PhysicalDisk (Get-PhysicalDisk per
+    server, riepilogo dedicato in console e mail) - vedi HANDOFF.md §3.17 per
+    il dettaglio completo. La versione compare anche come prima riga di log
+    di ogni esecuzione: e il modo piu veloce per verificare se la macchina su
+    cui giri lo script ha davvero l'ultimo aggiornamento.
 #>
 
 [CmdletBinding()]
 param(
     [string]   $ConfigPath,
     [string[]] $Server,
-    [ValidateSet('Os','Disk','Services','Components','Health','Dag','Replication','Databases','Queues','BackPressure','Certificates','Mapi')]
+    [ValidateSet('Os','Disk','PhysicalDisk','Services','Components','Health','Dag','Replication','Databases','Queues','BackPressure','Certificates','Mapi')]
     [string[]] $Check,
     [switch]   $NoMail,
     [switch]   $ForceMail,
@@ -79,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.9.0'
+$script:ScriptVersion  = '1.10.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -88,6 +89,7 @@ $script:ClusterSummary = New-Object System.Collections.Generic.List[object]
 $script:DatabaseCopySummary = New-Object System.Collections.Generic.List[object]
 $script:DatabaseCopyDetail  = New-Object System.Collections.Generic.List[object]
 $script:DatabaseSummary     = @()
+$script:PhysicalDiskSummary = New-Object System.Collections.Generic.List[object]
 $script:LogFile        = $null
 $script:ExSession      = $null
 $script:CheckFilter    = $Check
@@ -115,6 +117,7 @@ $DefaultConfigJson = @'
   "Checks": {
     "Os": true,
     "Disk": true,
+    "PhysicalDisk": true,
     "Services": true,
     "Components": true,
     "Health": true,
@@ -208,6 +211,7 @@ $DefaultConfigJson = @'
     "IncludeClusterSummary": true,
     "IncludeDatabaseSummary": true,
     "IncludeDatabasePerDbSummary": true,
+    "IncludePhysicalDiskSummary": true,
     "QueueAlertSubjectTag": "ATTENZIONE CODE",
     "SeparateAlertSubjectTag": "WARNING FOUND"
   },
@@ -216,6 +220,7 @@ $DefaultConfigJson = @'
     "ShowClusterSummary": true,
     "ShowDatabaseSummary": true,
     "ShowDatabasePerDbSummary": true,
+    "ShowPhysicalDiskSummary": true,
     "ShowQueueSummary": true
   },
   "Paths": {
@@ -874,6 +879,27 @@ function Get-HcRemoteData {
         $pfro = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
         if ($pfro) { $rebootPending = $true }
 
+        # Dischi fisici: su un DAG con storage JBOD (un disco dedicato per
+        # database, nessun RAID sui volumi dati - la ridondanza la fornisce il
+        # DAG stesso) un disco guasto colpisce esattamente un database, non gli
+        # altri sullo stesso server. Get-PhysicalDisk richiede il modulo
+        # Storage, incluso di default su Windows Server; se assente (RSAT
+        # mancante su qualche configurazione minimale) si degrada senza errori.
+        $physicalDisks = @()
+        if (Get-Command -Name Get-PhysicalDisk -ErrorAction SilentlyContinue) {
+            foreach ($disk in (Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+                $physicalDisks += [pscustomobject]@{
+                    DeviceId          = [string]$disk.DeviceId
+                    FriendlyName      = [string]$disk.FriendlyName
+                    SerialNumber      = [string]$disk.SerialNumber
+                    MediaType         = [string]$disk.MediaType
+                    HealthStatus      = [string]$disk.HealthStatus
+                    OperationalStatus = ($disk.OperationalStatus -join ', ')
+                    SizeGB            = if ($disk.Size) { [math]::Round($disk.Size / 1GB, 1) } else { 0 }
+                }
+            }
+        }
+
         $totalMemMB = [math]::Round($os.TotalVisibleMemorySize / 1KB, 0)
         $freeMemMB  = [math]::Round($os.FreePhysicalMemory / 1KB, 0)
 
@@ -888,6 +914,7 @@ function Get-HcRemoteData {
             Volumes         = $volumes
             Services        = $services
             RebootPending   = $rebootPending
+            PhysicalDisks   = $physicalDisks
             LocalTime       = [datetime](Get-Date)
         }
     }
@@ -1072,6 +1099,48 @@ function Invoke-HcDiskCheck {
         Add-Finding -Category 'Disk' -Server $Target.Name -Item $volumeId -Severity $sev `
             -Message ('{0}{1} liberi {2:N1} GB su {3:N1} GB ({4:N1}%).' -f $vol.Name, $label, $vol.FreeGB, $vol.CapacityGB, $vol.FreePercent) `
             -Value ('{0:N1} GB / {1:N1}%' -f $vol.FreeGB, $vol.FreePercent)
+    }
+}
+
+# Su uno storage JBOD (un disco dedicato per database, senza RAID sui volumi
+# dati - la ridondanza la fornisce il DAG) un disco fisico guasto colpisce
+# esattamente il database che ci vive sopra, lasciando sani gli altri sullo
+# stesso server: un sintomo che a lungo sembra "un solo database lento" e non
+# "il server ha un problema", finche' non si guarda Get-PhysicalDisk. Solo lo
+# stato Healthy conta come sano: qualunque altro valore (Warning, Unhealthy, o
+# uno stato mai visto) e' un segnale che l'array del produttore ha gia'
+# rilevato un problema, spesso prima che l'utente lo noti dai sintomi (§7).
+function Invoke-HcPhysicalDiskCheck {
+    param([object]$Target, [object]$Data)
+
+    if ($null -eq $Data) { return }
+    $disks = @($Data.PhysicalDisks)
+    if ($disks.Count -eq 0) { return }
+
+    foreach ($disk in $disks) {
+        $health = [string]$disk.HealthStatus
+        $sev = switch ($health) {
+            'Healthy'   { 'OK' }
+            'Warning'   { 'Warning' }
+            'Unhealthy' { 'Critical' }
+            default     { 'Unknown' }
+        }
+
+        $label = if ($disk.FriendlyName) { $disk.FriendlyName } else { $disk.DeviceId }
+        Add-Finding -Category 'PhysicalDisk' -Server $Target.Name -Item ('Disk{0}' -f $disk.DeviceId) -Severity $sev `
+            -Message ('Disco {0} ({1}, {2:N0} GB): stato {3}, operativo {4}.' -f $label, $disk.MediaType, $disk.SizeGB, $health, $disk.OperationalStatus) `
+            -Value $health
+
+        $script:PhysicalDiskSummary.Add([pscustomobject]@{
+            Server            = $Target.Name
+            DeviceId          = $disk.DeviceId
+            FriendlyName      = $label
+            MediaType         = $disk.MediaType
+            SizeGB            = $disk.SizeGB
+            HealthStatus      = $health
+            OperationalStatus = $disk.OperationalStatus
+            Severity          = $sev
+        }) | Out-Null
     }
 }
 
@@ -2605,6 +2674,28 @@ function Write-HcDatabasePerDbSummaryConsole {
     Write-Host ""
 }
 
+function Write-HcPhysicalDiskSummaryConsole {
+    param([object[]]$PhysicalDiskSummary)
+
+    if (-not $PhysicalDiskSummary -or $PhysicalDiskSummary.Count -eq 0) { return }
+
+    $notHealthy = @($PhysicalDiskSummary | Where-Object { $_.Severity -ne 'OK' })
+    Write-Host ("`nDischi fisici - {0} totali su {1} server, {2} non sani" -f $PhysicalDiskSummary.Count, (@($PhysicalDiskSummary.Server | Select-Object -Unique)).Count, $notHealthy.Count) -ForegroundColor White
+    $header = '{0,-20} {1,-8} {2,-28} {3,-10} {4,8} {5,-10} {6}' -f 'Server', 'Disco', 'Modello', 'Tipo', 'GB', 'Stato', 'Operativo'
+    Write-Host $header -ForegroundColor Gray
+    Write-Host ('-' * $header.Length) -ForegroundColor Gray
+
+    # Severita poi server: qui l'obiettivo e' vedere subito i pochi dischi
+    # malati in cima, non scorrere un inventario fisso come per i database -
+    # su un DAG con decine di dischi per server, la severita in cima e' quella
+    # utile.
+    foreach ($row in ($PhysicalDiskSummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Server, DeviceId)) {
+        $line = '{0,-20} {1,-8} {2,-28} {3,-10} {4,8:N0} {5,-10} {6}' -f $row.Server, $row.DeviceId, $row.FriendlyName, $row.MediaType, $row.SizeGB, $row.HealthStatus, $row.OperationalStatus
+        Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.Severity)
+    }
+    Write-Host ""
+}
+
 function New-HcMailBody {
     param(
         [object]$AlertResult,
@@ -2614,6 +2705,7 @@ function New-HcMailBody {
         [object[]]$ClusterSummary,
         [object[]]$DatabaseCopySummary,
         [object[]]$DatabaseSummary,
+        [object[]]$PhysicalDiskSummary,
         [switch]$Heartbeat
     )
 
@@ -2757,6 +2849,41 @@ function New-HcMailBody {
                 "<td style='border:1px solid #dfe4e6;'>{5}</td></tr>"
             $html = $template -f $color, (ConvertTo-HcHtmlText $row.DbName), $activeStyle,
                                  (ConvertTo-HcHtmlText $row.ActiveServer), $row.CopyCount, (ConvertTo-HcHtmlText $row.CopyDetail)
+            [void]$sb.AppendLine($html)
+        }
+        [void]$sb.AppendLine('</table>')
+    }
+
+    # Vista aggregata dei dischi fisici: su storage JBOD (un disco dedicato per
+    # database, niente RAID sui volumi dati) un disco che degrada colpisce un
+    # solo database, restando invisibile finche' non si guarda qui invece che
+    # nei sintomi del database stesso.
+    $diskSummary = @($PhysicalDiskSummary)
+    if ($diskSummary.Count -gt 0 -and $script:Config.Mail.IncludePhysicalDiskSummary) {
+        $diskNotHealthy = @($diskSummary | Where-Object { $_.Severity -ne 'OK' })
+        [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:22px 0 6px 0;'>Dischi fisici - $($diskSummary.Count) totali, $($diskNotHealthy.Count) non sani</h3>")
+        [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
+        [void]$sb.AppendLine("<tr style='background:#f4f6f7;text-align:left;'>" +
+            "<th style='border:1px solid #dfe4e6;'>Server</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Disco</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Modello</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Tipo</th>" +
+            "<th style='border:1px solid #dfe4e6;'>GB</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Stato</th>" +
+            "<th style='border:1px solid #dfe4e6;'>Operativo</th></tr>")
+
+        foreach ($row in ($diskSummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Server, DeviceId)) {
+            $color = Get-HcSeverityColor $row.Severity
+            $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;border-left:4px solid {0};'>{1}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{2}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{3}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{4}</td>" +
+                "<td style='border:1px solid #dfe4e6;text-align:center;'>{5}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{6}</td>" +
+                "<td style='border:1px solid #dfe4e6;'>{7}</td></tr>"
+            $html = $template -f $color, (ConvertTo-HcHtmlText $row.Server), (ConvertTo-HcHtmlText $row.DeviceId),
+                                 (ConvertTo-HcHtmlText $row.FriendlyName), (ConvertTo-HcHtmlText $row.MediaType), $row.SizeGB,
+                                 (ConvertTo-HcHtmlText $row.HealthStatus), (ConvertTo-HcHtmlText $row.OperationalStatus)
             [void]$sb.AppendLine($html)
         }
         [void]$sb.AppendLine('</table>')
@@ -3049,7 +3176,7 @@ try {
 
     # --- Dati OS in parallelo
     $remoteData = @{}
-    if ((Test-CheckEnabled 'Os') -or (Test-CheckEnabled 'Disk') -or (Test-CheckEnabled 'Services')) {
+    if ((Test-CheckEnabled 'Os') -or (Test-CheckEnabled 'Disk') -or (Test-CheckEnabled 'PhysicalDisk') -or (Test-CheckEnabled 'Services')) {
         $remoteData = Get-HcRemoteData -Targets $targets
     }
 
@@ -3062,8 +3189,9 @@ try {
         Write-HcLog ('--- Controllo server {0} ({1})' -f $target.Name, $target.Role)
 
         if (Test-CheckEnabled 'Os')       { Invoke-HcCheck -Category 'Os'       -ServerName $target.Name -Body { Invoke-HcOsCheck      -Target $target -Data $data } }
-        if (Test-CheckEnabled 'Disk')     { Invoke-HcCheck -Category 'Disk'     -ServerName $target.Name -Body { Invoke-HcDiskCheck    -Target $target -Data $data } }
-        if (Test-CheckEnabled 'Services') { Invoke-HcCheck -Category 'Service'  -ServerName $target.Name -Body { Invoke-HcServiceCheck -Target $target -Data $data } }
+        if (Test-CheckEnabled 'Disk')         { Invoke-HcCheck -Category 'Disk'         -ServerName $target.Name -Body { Invoke-HcDiskCheck         -Target $target -Data $data } }
+        if (Test-CheckEnabled 'PhysicalDisk') { Invoke-HcCheck -Category 'PhysicalDisk' -ServerName $target.Name -Body { Invoke-HcPhysicalDiskCheck -Target $target -Data $data } }
+        if (Test-CheckEnabled 'Services')     { Invoke-HcCheck -Category 'Service'      -ServerName $target.Name -Body { Invoke-HcServiceCheck      -Target $target -Data $data } }
 
         # WinRM e i cmdlet Exchange sono due canali diversi: un server puo essere
         # vivo e sano ma avere WinRM chiuso. Di default si salta comunque, per non
@@ -3140,6 +3268,10 @@ try {
         Write-HcDatabasePerDbSummaryConsole -DatabaseSummary $script:DatabaseSummary
     }
 
+    if ($script:Config.Console.ShowPhysicalDiskSummary) {
+        Write-HcPhysicalDiskSummaryConsole -PhysicalDiskSummary $script:PhysicalDiskSummary.ToArray()
+    }
+
     if ($script:Config.Console.ShowQueueSummary) {
         Write-HcQueueSummaryConsole -QueueSummary $script:QueueSummary.ToArray()
     }
@@ -3195,7 +3327,7 @@ try {
         $body = New-HcMailBody -AlertResult $alerts -AllFindings $allFindings -Targets $targets `
             -QueueSummary $script:QueueSummary.ToArray() -ClusterSummary $script:ClusterSummary.ToArray() `
             -DatabaseCopySummary $script:DatabaseCopySummary.ToArray() -DatabaseSummary $script:DatabaseSummary `
-            -Heartbeat:$isHeartbeat
+            -PhysicalDiskSummary $script:PhysicalDiskSummary.ToArray() -Heartbeat:$isHeartbeat
 
         $criticalCount = @($toNotify | Where-Object { $_.Severity -eq 'Critical' }).Count
         $warningCount  = @($toNotify | Where-Object { $_.Severity -in @('Warning','Unknown') }).Count
