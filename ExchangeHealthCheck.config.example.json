@@ -93,16 +93,6 @@
       "FreeGBCritical": 15,
       "FreePercentWarning": 0,
       "FreePercentCritical": 0
-    },
-    {
-      "_comment": "Disco di sistema",
-      "ServerPattern": "*",
-      "VolumePattern": "C:*",
-      "Mode": "Or",
-      "FreeGBWarning": 15,
-      "FreeGBCritical": 8,
-      "FreePercentWarning": 0,
-      "FreePercentCritical": 0
     }
   ],
 

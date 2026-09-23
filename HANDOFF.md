@@ -694,6 +694,20 @@ con la logica già in uso per evitare falsi positivi su volumi molto grandi
 (10% di un volume da 4 TB sono comunque 400 GB liberi, non un'emergenza).
 `DiskFreePercentWarning`/`DiskFreeGBWarning` (20% / 60 GB) restano invariati.
 
+**Bug scoperto subito dopo**: la modifica sopra non aveva alcun effetto
+osservabile sul disco di sistema. Causa: `VolumeOverrides` (esempio e config
+locale) conteneva gia' una voce dedicata `VolumePattern: "C:*"` con
+`Mode: "Or"` e soglie proprie (`FreeGBWarning: 15`, `FreeGBCritical: 8`,
+percentuale disattivata con soglia 0) — gli override hanno sempre la
+precedenza sulla soglia generale per il volume che matchano (`Get-HcVolumeThreshold`,
+primo match vince), quindi la soglia generale in And non veniva mai
+consultata per `C:`, sempre e comunque, a prescindere da quale fosse il suo
+valore. Rimossa la voce `C:*` da `VolumeOverrides` in entrambi i file: ora il
+disco di sistema usa la soglia generale (6% E 15 GB, And) esattamente come
+richiesto. Verificato con un test mirato (`Invoke-HcDiskCheck` con 4%/5GB
+liberi su un volume `C:` -> `Critical`, prima del fix sarebbe stato valutato
+solo su GB con soglia Or, ignorando la percentuale).
+
 ### 3.21 Alert "sostenuto": non notificare code Replay/Copy che si risolvono da sole
 
 Su richiesta esplicita dell'utente (2026-09-23): `ReplayQueue`/`CopyQueue`
