@@ -864,6 +864,44 @@ con `LowIssue` come unica anomalia, `Resolve-HcAlert` che conferma zero
 notifiche per un `LowIssue` con la soglia di default, e `New-HcMailBody` che
 genera correttamente la tabella dedicata con la riga attesa.
 
+### 3.24 Tabelle mail raggruppate "per evento" invece che per server
+
+Su richiesta esplicita dell'utente (2026-09-23): prima ogni tabella di
+finding ("Nuove anomalie", "Anomalie peggiorate", "Anomalie ancora aperte",
+"Low Issue" — tutte generate da `New-HcFindingTable`) mostrava una riga per
+ogni singolo finding, cioè una riga per **server**: lo stesso health set
+Unhealthy visto su 5 membri del DAG produceva 5 righe identiche tranne il
+nome server, difficile da leggere su un ambiente con molti server.
+
+**Nuova funzione `Get-HcMergedFindingRows`**: raggruppa per
+`Categoria + Oggetto + Severità` (non per singolo finding) e produce una riga
+per gruppo, con un nuovo campo `Servers` — l'elenco dei server coinvolti,
+ciascuno seguito dal proprio `Value` tra parentesi quando presente (es.
+`GRPI-EXC-PC13 (3.9 GB / 3.9%), GRPI-EXC-PC30 (4.2 GB / 3.5%)` per un disco,
+`GRPI-EXC-PV00 (Unhealthy), GRPI-EXC-PV02 (Unhealthy)` per un health set). Il
+`Dettaglio` mostrato è il messaggio del primo finding del gruppo — per le
+categorie dove il messaggio è già identico su tutti i server (Managed
+Availability, Database, Certificate: il testo non incorpora un valore per
+server) resta rappresentativo del gruppo intero; per Disco (dove il
+messaggio incorpora GB/percentuale specifici del singolo server) il valore
+esatto per ciascun server si legge invece nella colonna Server, non nel
+Dettaglio — scelta deliberata per non dover inventare un secondo testo
+generico "senza numeri" solo per quella categoria.
+
+**Colonne riordinate**: Severità, Categoria, Oggetto, Dettaglio, Server (era
+Severità, Server, Categoria, Oggetto, Dettaglio) — Server è ora l'ultima
+colonna perché può contenere una lista, non un singolo nome.
+
+**Cosa NON è stato toccato**: la tabella "Rientrate" (Recovered) ha una
+struttura diversa (include `Durata`, costruita da `$AlertResult.Recovered`,
+non da `$AllFindings`) e per ora resta una riga per server — se in futuro
+serve lo stesso raggruppamento anche lì, va progettato a parte (la Durata
+andrebbe aggregata min/max o elencata per server come Value).
+
+Verificato con un test dedicato: 6 finding grezzi (3 stesso health set su 3
+server con messaggio diverso solo nel timestamp, 2 dischi diversi con valori
+diversi, 1 database singolo) collassano correttamente in 3 righe.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:

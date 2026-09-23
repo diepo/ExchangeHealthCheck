@@ -138,6 +138,14 @@ segnalato identico su 5 server dello stesso DAG (spesso è davvero la stessa
 causa), conta 1, non 5. Due dischi pieni su server diversi, con GB liberi
 realmente diversi, restano invece due voci — non sono la stessa cosa.
 
+Le tabelle di dettaglio sotto ("Nuove anomalie", "Anomalie peggiorate",
+"Anomalie ancora aperte", "Low Issue") seguono lo stesso principio: una riga
+per **evento** (stessa categoria, stesso oggetto, stessa severità), non una
+riga per server. Se coinvolge più server, li trovi tutti elencati nella
+colonna "Server" in fondo alla riga — per un disco, ciascun server è seguito
+tra parentesi dal proprio spazio libero (es. `PC30 (4.2 GB / 3.5%)`), perché
+in quel caso il numero cambia davvero da un server all'altro.
+
 **Riepiloghi per cluster e per database.** Sullo stesso principio, la mail
 mostra anche una vista aggregata dello **stato del cluster per DAG** (nodi
 totali, quanti attivi, quali fermi e il loro stato) e delle **copie database

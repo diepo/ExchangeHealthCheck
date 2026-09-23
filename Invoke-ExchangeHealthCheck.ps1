@@ -1,4 +1,4 @@
-# Versione script: 1.19.1 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.20.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.19.1 (2026-09-23)
+    Versione script: 1.20.0 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.19.1'
+$script:ScriptVersion  = '1.20.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -2668,30 +2668,63 @@ function New-HcCategorySummaryTable {
     return $sb.ToString()
 }
 
+# Raggruppa i finding "per evento" invece che per server: lo stesso problema
+# (stessa Categoria+Oggetto+Severita) visto su piu server del DAG diventa una
+# riga sola, con l'elenco dei server coinvolti invece di una riga duplicata
+# per ciascuno. Per Categoria+Oggetto dove il finding e' davvero la stessa
+# entita' su piu copie/membri (es. health set Managed Availability, database
+# in un DAG) e' un netto miglioramento; per Disco ogni server ha un disco
+# fisicamente diverso, ma raggruppare per "stessa lettera, stessa severita'"
+# resta utile (stesso tipo di problema) - il valore specifico per server
+# (Value, gia' popolato da ogni check: GB liberi, stato del certificato,
+# AlertValue del health set...) viene mostrato accanto al nome server cosi'
+# non si perde il dettaglio numerico che prima stava nel messaggio.
+function Get-HcMergedFindingRows {
+    param([object[]]$Rows)
+    if (-not $Rows -or $Rows.Count -eq 0) { return @() }
+
+    $groups = $Rows | Group-Object Category, Item, Severity
+    return @(foreach ($g in $groups) {
+        $first = $g.Group[0]
+        $servers = ($g.Group | Sort-Object Server | ForEach-Object {
+            if ($_.Value) { '{0} ({1})' -f $_.Server, $_.Value } else { [string]$_.Server }
+        }) -join ', '
+        [pscustomobject]@{
+            Severity     = $first.Severity
+            Category     = $first.Category
+            Item         = $first.Item
+            Message      = $first.Message
+            Servers      = $servers
+            ServerCount  = $g.Group.Count
+        }
+    })
+}
+
 function New-HcFindingTable {
     param([string]$Title, [object[]]$Rows, [string]$Accent = '#34495e')
 
     if (-not $Rows -or $Rows.Count -eq 0) { return '' }
+    $merged = Get-HcMergedFindingRows -Rows $Rows
 
     $sb = New-Object System.Text.StringBuilder
-    [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:$Accent;margin:22px 0 6px 0;'>$(ConvertTo-HcHtmlText $Title) ($($Rows.Count))</h3>")
+    [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:$Accent;margin:22px 0 6px 0;'>$(ConvertTo-HcHtmlText $Title) ($($merged.Count))</h3>")
     [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
-    [void]$sb.AppendLine("<tr style='background:#f4f6f7;color:#2c3e50;text-align:left;'><th style='border:1px solid #dfe4e6;'>Severita</th><th style='border:1px solid #dfe4e6;'>Server</th><th style='border:1px solid #dfe4e6;'>Categoria</th><th style='border:1px solid #dfe4e6;'>Oggetto</th><th style='border:1px solid #dfe4e6;'>Dettaglio</th></tr>")
+    [void]$sb.AppendLine("<tr style='background:#f4f6f7;color:#2c3e50;text-align:left;'><th style='border:1px solid #dfe4e6;'>Severita</th><th style='border:1px solid #dfe4e6;'>Categoria</th><th style='border:1px solid #dfe4e6;'>Oggetto</th><th style='border:1px solid #dfe4e6;'>Dettaglio</th><th style='border:1px solid #dfe4e6;'>Server</th></tr>")
 
-    foreach ($row in ($Rows | Sort-Object @{Expression={Get-SeverityRank $_.Severity}; Descending=$true}, Server, Category)) {
+    foreach ($row in ($merged | Sort-Object @{Expression={Get-SeverityRank $_.Severity}; Descending=$true}, Category, Item)) {
         $color = Get-HcSeverityColor $row.Severity
         $template = "<tr>" +
             "<td style='border:1px solid #dfe4e6;'><span style='display:inline-block;padding:2px 8px;border-radius:3px;background:{0};color:#fff;font-weight:600;'>{1}</span></td>" +
-            "<td style='border:1px solid #dfe4e6;font-weight:600;'>{2}</td>" +
+            "<td style='border:1px solid #dfe4e6;'>{2}</td>" +
             "<td style='border:1px solid #dfe4e6;'>{3}</td>" +
             "<td style='border:1px solid #dfe4e6;'>{4}</td>" +
-            "<td style='border:1px solid #dfe4e6;'>{5}</td>" +
+            "<td style='border:1px solid #dfe4e6;font-weight:600;'>{5}</td>" +
             "</tr>"
         # NB: l'espressione -f va risolta fuori dalla chiamata di metodo, altrimenti
         # le virgole vengono lette come separatori di argomenti di AppendLine().
-        $html = $template -f $color, (ConvertTo-HcHtmlText $row.Severity), (ConvertTo-HcHtmlText $row.Server),
+        $html = $template -f $color, (ConvertTo-HcHtmlText $row.Severity),
                               (ConvertTo-HcHtmlText $row.Category), (ConvertTo-HcHtmlText $row.Item),
-                              (ConvertTo-HcHtmlText $row.Message)
+                              (ConvertTo-HcHtmlText $row.Message), (ConvertTo-HcHtmlText $row.Servers)
         [void]$sb.AppendLine($html)
     }
     [void]$sb.AppendLine('</table>')
