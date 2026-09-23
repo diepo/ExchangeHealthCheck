@@ -1,4 +1,4 @@
-# Versione script: 1.14.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.15.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.14.0 (2026-09-23)
+    Versione script: 1.15.0 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.14.0'
+$script:ScriptVersion  = '1.15.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -132,9 +132,9 @@ $DefaultConfigJson = @'
   "Thresholds": {
     "DiskMode": "And",
     "DiskFreePercentWarning": 20,
-    "DiskFreePercentCritical": 10,
+    "DiskFreePercentCritical": 6,
     "DiskFreeGBWarning": 60,
-    "DiskFreeGBCritical": 25,
+    "DiskFreeGBCritical": 15,
     "MinimumVolumeSizeGB": 5,
     "MemoryFreePercentWarning": 6,
     "MemoryFreePercentCritical": 3,
@@ -191,7 +191,9 @@ $DefaultConfigJson = @'
     "SendRecovery": true,
     "HeartbeatHours": 24,
     "NotifyOnUnknown": true,
-    "MinimumSeverityToMail": "Warning"
+    "MinimumSeverityToMail": "Warning",
+    "SustainedDurationMinutes": 120,
+    "SustainedCategories": ["ReplayQueue", "CopyQueue"]
   },
   "Mail": {
     "Enabled": true,
@@ -2326,6 +2328,18 @@ function Resolve-HcAlert {
     $notifyUnk = [bool]$script:Config.Alerting.NotifyOnUnknown
     $now       = Get-Date
 
+    # Un finding che compare e si risolve da solo in pochi minuti (tipico di
+    # ReplayQueue/CopyQueue durante una replica normale, non un incidente) non
+    # deve generare un alert. Per le categorie in SustainedCategories, un
+    # finding nuovo NON viene notificato subito: si inizia solo a tracciarne
+    # la durata (FirstSeen, gia' persistito tra un giro e l'altro). Diventa un
+    # alert vero solo se resta elevato ininterrottamente per almeno
+    # SustainedDurationMinutes; se nel frattempo rientra, sparisce dallo stato
+    # senza mai aver generato una notifica (e senza comparire come "rientro",
+    # vedi piu' sotto: non si puo' recuperare da un allarme mai dato). 0 = off.
+    $sustainedMinutes    = [double]$script:Config.Alerting.SustainedDurationMinutes
+    $sustainedCategories = @($script:Config.Alerting.SustainedCategories)
+
     $active = @($Findings | Where-Object {
         $rank = Get-SeverityRank $_.Severity
         ($rank -ge $minRank) -and ($notifyUnk -or $_.Severity -ne 'Unknown')
@@ -2346,15 +2360,36 @@ function Resolve-HcAlert {
         $previous = $null
         if ($State.Alerts.PSObject.Properties.Name -contains $key) { $previous = $State.Alerts.$key }
 
+        $requiresSustain = $false
+        if ($sustainedMinutes -gt 0) {
+            foreach ($pattern in $sustainedCategories) {
+                if ($pattern -and $finding.Category -like $pattern) { $requiresSustain = $true; break }
+            }
+        }
+
         if ($null -eq $previous) {
-            $newAlerts.Add($finding) | Out-Null
-            $entry = [pscustomobject]@{
-                FirstSeen    = $now
-                LastSeen     = $now
-                LastNotified = $now
-                Severity     = $finding.Severity
-                Occurrences  = 1
-                Message      = $finding.Message
+            if ($requiresSustain -and -not $ForceMail) {
+                # Prima comparsa: si inizia solo a tracciare da quando e' elevato,
+                # nessuna notifica finche' non supera SustainedDurationMinutes.
+                $entry = [pscustomobject]@{
+                    FirstSeen    = $now
+                    LastSeen     = $now
+                    LastNotified = $null
+                    Severity     = $finding.Severity
+                    Occurrences  = 1
+                    Message      = $finding.Message
+                }
+            }
+            else {
+                $newAlerts.Add($finding) | Out-Null
+                $entry = [pscustomobject]@{
+                    FirstSeen    = $now
+                    LastSeen     = $now
+                    LastNotified = $now
+                    Severity     = $finding.Severity
+                    Occurrences  = 1
+                    Message      = $finding.Message
+                }
             }
         }
         else {
@@ -2364,7 +2399,17 @@ function Resolve-HcAlert {
             if ($previous.LastNotified) { $lastNotified = ConvertTo-HcSafeDateTime -Value $previous.LastNotified -Context "LastNotified di $key" }
 
             $shouldNotify = $false
-            if ($currRank -gt $prevRank) { $escalated.Add($finding) | Out-Null; $shouldNotify = $true }
+            if ($requiresSustain -and $null -eq $lastNotified) {
+                # Ancora in attesa di superare la soglia di durata: nessuna
+                # escalation/reminder finche' non e' mai stato notificato
+                # neanche una prima volta.
+                $firstSeenSafe = ConvertTo-HcSafeDateTime -Value $previous.FirstSeen -Context "FirstSeen di $key"
+                if ($ForceMail -or ($firstSeenSafe -and ($now - $firstSeenSafe).TotalMinutes -ge $sustainedMinutes)) {
+                    $newAlerts.Add($finding) | Out-Null
+                    $shouldNotify = $true
+                }
+            }
+            elseif ($currRank -gt $prevRank) { $escalated.Add($finding) | Out-Null; $shouldNotify = $true }
             elseif ($ForceMail) { $reminders.Add($finding) | Out-Null; $shouldNotify = $true }
             elseif ($null -eq $lastNotified -or ($now - $lastNotified).TotalMinutes -ge $cooldown) {
                 $reminders.Add($finding) | Out-Null; $shouldNotify = $true
@@ -2383,9 +2428,12 @@ function Resolve-HcAlert {
         Add-Member -InputObject $nextState -NotePropertyName $key -NotePropertyValue $entry -Force
     }
 
-    # Chiavi presenti nello stato ma non piu attive = rientro
+    # Chiavi presenti nello stato ma non piu attive = rientro. Una voce mai
+    # notificata (era solo in attesa della soglia di durata sostenuta, vedi
+    # sopra) non genera un "rientro": non si puo' recuperare da un allarme
+    # che non e' mai stato dato.
     foreach ($prop in $State.Alerts.PSObject.Properties) {
-        if (-not $activeKeys.ContainsKey($prop.Name)) {
+        if (-not $activeKeys.ContainsKey($prop.Name) -and $prop.Value.LastNotified) {
             $parts = $prop.Name -split '\|'
             $recovered.Add([pscustomobject]@{
                 Key        = $prop.Name

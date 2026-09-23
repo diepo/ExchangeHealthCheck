@@ -377,6 +377,21 @@ Outlook.Proxy/MapiHttp.Proxy) **non** vengono soppressi allo stesso modo: sono
 funzioni di front-end che un server esercita per qualunque utente
 dell'organizzazione, non solo per le cassette che ospita localmente.
 
+**Vedo una ReplayQueue/CopyQueue in Warning nel report, ma non ho ricevuto una mail di alert**
+Comportamento voluto, non un bug: `ReplayQueue`/`CopyQueue` oscillano
+normalmente in Warning durante una replica pesante (dopo un riavvio, un
+failover, un picco di scrittura) e spesso rientrano da sole in pochi minuti —
+non un incidente. Lo script ora aspetta che restino elevate **ininterrottamente
+per almeno 2 ore** (default, configurabile in
+`Alerting.SustainedDurationMinutes`) prima di inviare un alert per queste due
+categorie specifiche (`Alerting.SustainedCategories`); se rientrano prima, non
+arriva nessuna mail, ma restano comunque visibili nel report/console/log di
+ogni giro nel frattempo. Tutte le altre categorie (certificati, componenti,
+ActiveSync, ecc.) continuano a notificare subito come prima — questo
+comportamento è specifico solo per le code di replica del DAG. Per un test
+immediato senza aspettare 2 ore, `-ForceMail`/`-TestMail` bypassano sempre
+l'attesa.
+
 ## 8. Sicurezza e privacy dei dati
 
 - Lo script non modifica nulla in Exchange: solo cmdlet `Get-*` e `Test-*`.

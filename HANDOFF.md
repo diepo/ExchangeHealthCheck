@@ -682,6 +682,49 @@ foreach diretto. Stesso fix applicato anche alla nuova
 sessione: il bug è stato notato mentre si scriveva codice nuovo con lo stesso
 pattern e non ha mai raggiunto un commit.
 
+### 3.20bis Soglia Critical disco più stringente
+
+Su richiesta esplicita dell'utente (2026-09-23): `DiskFreePercentCritical`
+10→**6**, `DiskFreeGBCritical` 25→**15** (in `$DefaultConfigJson`, in
+`ExchangeHealthCheck.config.example.json` e nel config locale). `DiskMode`
+resta `And` (default preesistente, invariato): il Critical scatta solo
+quando **entrambe** le condizioni sono vere insieme (percentuale libera sotto
+il 6% **e** meno di 15 GB liberi), non con l'una o l'altra da sola — coerente
+con la logica già in uso per evitare falsi positivi su volumi molto grandi
+(10% di un volume da 4 TB sono comunque 400 GB liberi, non un'emergenza).
+`DiskFreePercentWarning`/`DiskFreeGBWarning` (20% / 60 GB) restano invariati.
+
+### 3.21 Alert "sostenuto": non notificare code Replay/Copy che si risolvono da sole
+
+Su richiesta esplicita dell'utente (2026-09-23): `ReplayQueue`/`CopyQueue`
+oscillano normalmente in Warning durante una replica pesante (es. dopo un
+riavvio del servizio replica, un failover, un picco di scrittura) e spesso
+rientrano da soli entro pochi minuti — non un incidente, solo il DAG che sta
+smaltendo il backlog. Notificare ogni volta genera fatica da allarme senza
+informazione utile: quello che conta e' sapere se resta indietro **a lungo**,
+non se e' stato Warning per tre minuti.
+
+**Implementazione**: `Resolve-HcAlert` (macchina a stati esistente, §5 riga 12
+e dintorni — gia' persisteva `FirstSeen` per ogni finding tra un giro e
+l'altro in `State\alert-state.json`) ora, per le categorie elencate in
+`Alerting.SustainedCategories` (default `["ReplayQueue", "CopyQueue"]`), non
+notifica piu' un finding alla sua prima comparsa: si limita a iniziare a
+tracciarne la durata. Diventa un alert vero (finisce in "Nuove anomalie") solo
+se resta ininterrottamente elevato (Warning o Critical) per almeno
+`Alerting.SustainedDurationMinutes` (default 120 = 2 ore, 0 disattiva la
+funzione). Se rientra prima, la voce sparisce dallo stato senza aver mai
+generato una notifica — e senza comparire nemmeno tra i "rientri", perché non
+si può recuperare da un allarme mai dato (altrimenti l'utente riceverebbe un
+"risolto" per qualcosa che non gli era mai stato segnalato).
+
+Una volta superata la soglia e notificato per la prima volta, il finding torna
+al comportamento normale: un'ulteriore escalation di severità o il cooldown
+per i promemoria funzionano esattamente come per qualunque altro alert.
+`-ForceMail`/`-TestMail` bypassano sempre l'attesa (comodo per verificare la
+configurazione senza dover aspettare 2 ore). La soglia è **per categoria**,
+non globale: gli altri health set/categorie (ActiveSync, certificati,
+componenti, ecc.) restano notificati subito come sempre, non solo Replay/Copy.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -698,7 +741,7 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary` (per server), `ShowDatabasePerDbSummary` (per database, §3.15), `ShowPhysicalDiskSummary` (§3.17), `ShowQueueSummary` |
 | `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets (statico, per nome), HealthSetsWithoutDatabaseCopy (dinamico, solo su server senza copie — §3.20), Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
 | `ExtraServices` | Servizi non-Exchange da includere nel check Services (default W3SVC, WinRM — RemoteRegistry rimosso, §3.19) |
-| `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare |
+| `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare, `SustainedDurationMinutes`/`SustainedCategories` (alert "sostenuto" per Replay/Copy queue, §3.21) |
 | `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12), `IncludeDatabasePerDbSummary` (§3.15), `IncludePhysicalDiskSummary` (§3.17) |
 | `Paths` | Cartelle di log/report/stato, retention |
 

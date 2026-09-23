@@ -36,9 +36,9 @@
   "Thresholds": {
     "DiskMode": "And",
     "DiskFreePercentWarning": 20,
-    "DiskFreePercentCritical": 10,
+    "DiskFreePercentCritical": 6,
     "DiskFreeGBWarning": 60,
-    "DiskFreeGBCritical": 25,
+    "DiskFreeGBCritical": 15,
     "MinimumVolumeSizeGB": 5,
 
     "MemoryFreePercentWarning": 6,
