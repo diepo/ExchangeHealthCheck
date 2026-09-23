@@ -23,7 +23,7 @@ Repository: https://github.com/diepo/ExchangeHealthCheck
 | DAG | Membri fermi, witness, nodi del cluster |
 | Copie di database | Stato delle copie, copy/replay queue, content index |
 | Replica | `Test-ReplicationHealth` |
-| Database | Database non montati, età dell'ultimo backup |
+| Database | Database non montati, copia attiva fuori preferenza 1 |
 | Code di trasporto | Code accumulate, submission, poison, retry, back pressure |
 | Certificati | Scadenza, stato non valido, duplicati che confondono i connector |
 

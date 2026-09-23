@@ -592,6 +592,17 @@ dopo quella per-database.
 livelli diversi, un volume pieno e un disco fisico degradato sono due
 problemi distinti anche se a volte collegati.
 
+### 3.18 Rimosso: check e alert sul backup
+
+Su richiesta esplicita dell'utente (2026-09-23), rimosso l'intero blocco
+"Backup" da `Invoke-HcDatabaseCheck`: non genera più finding di categoria
+`Backup` (né "nessun backup registrato" né "ultimo backup troppo vecchio").
+Rimosse anche le soglie `Thresholds.BackupAgeHoursWarning`/
+`BackupAgeHoursCritical` da `$DefaultConfigJson` e da entrambi i file di
+config. Il resto del check database (stato di mount, copia attiva fuori
+preferenza 1) resta invariato — il backup era solo una delle tre cose
+verificate da quella funzione, non l'intero check.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -601,7 +612,7 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `Organization` | Nome, server a cui connettersi (`ConnectTo`, usato solo se non si è già in Exchange Management Shell), `ViewEntireForest`, rilevamento/override del domain controller |
 | `Servers` | Perimetro (`Include`/`Exclude`/`SiteFilter`/`IncludeEdge`), `UseFqdnForRemoting`, `SkipExchangeChecksWhenOffline` |
 | `Checks` | Un booleano per famiglia di controllo (Os, Disk, PhysicalDisk (§3.17), Services, Components, Health, Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi) |
-| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code (`QueueWarning`/`QueueCritical` per singola coda, `QueueTotalWarning`/`QueueTotalCritical` per il totale-server, §3.14), copy/replay queue del DAG, età backup, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
+| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code (`QueueWarning`/`QueueCritical` per singola coda, `QueueTotalWarning`/`QueueTotalCritical` per il totale-server, §3.14), copy/replay queue del DAG, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |

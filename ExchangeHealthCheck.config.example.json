@@ -60,9 +60,6 @@
     "ReplayQueueWarning": 20,
     "ReplayQueueCritical": 100,
 
-    "BackupAgeHoursWarning": 36,
-    "BackupAgeHoursCritical": 72,
-
     "CertExpiryDaysWarning": 30,
     "CertExpiryDaysCritical": 7,
 

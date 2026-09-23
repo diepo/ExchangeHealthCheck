@@ -1,4 +1,4 @@
-# Versione script: 1.10.0 (2026-09-18) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.11.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -15,7 +15,7 @@
       - Managed Availability (Get-HealthReport)
       - DAG: stato gruppo, witness, copy status, copy/replay queue, content index
       - Test-ReplicationHealth
-      - Database: mount state, backup age, copia attiva non su preference 1
+      - Database: mount state, copia attiva non su preference 1
       - Code di trasporto (Get-Queue) + back pressure
       - Certificati in scadenza
       - Test-MapiConnectivity
@@ -58,11 +58,11 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.10.0 (2026-09-18)
-    Ultimo aggiornamento: nuovo check PhysicalDisk (Get-PhysicalDisk per
-    server, riepilogo dedicato in console e mail) - vedi HANDOFF.md §3.17 per
-    il dettaglio completo. La versione compare anche come prima riga di log
-    di ogni esecuzione: e il modo piu veloce per verificare se la macchina su
+    Versione script: 1.11.0 (2026-09-23)
+    Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
+    BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
+    HANDOFF.md §3.18. La versione compare anche come prima riga di log di
+    ogni esecuzione: e il modo piu veloce per verificare se la macchina su
     cui giri lo script ha davvero l'ultimo aggiornamento.
 #>
 
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.10.0'
+$script:ScriptVersion  = '1.11.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -152,8 +152,6 @@ $DefaultConfigJson = @'
     "CopyQueueCritical": 50,
     "ReplayQueueWarning": 20,
     "ReplayQueueCritical": 100,
-    "BackupAgeHoursWarning": 36,
-    "BackupAgeHoursCritical": 72,
     "CertExpiryDaysWarning": 30,
     "CertExpiryDaysCritical": 7,
 
@@ -1775,27 +1773,6 @@ function Invoke-HcDatabaseCheck {
         else {
             Add-Finding -Category 'Database' -Server $activeServer -Item $dbName -Severity 'OK' `
                 -Message ('Database "{0}" montato su {1}.' -f $dbName, $activeServer) -Value 'Mounted'
-        }
-
-        # --- Backup
-        $lastFull = $db.LastFullBackup
-        $lastIncr = $db.LastIncrementalBackup
-        $lastBackup = $null
-        if ($lastFull) { $lastBackup = [datetime]$lastFull }
-        if ($lastIncr -and (-not $lastBackup -or [datetime]$lastIncr -gt $lastBackup)) { $lastBackup = [datetime]$lastIncr }
-
-        if (-not $lastBackup) {
-            Add-Finding -Category 'Backup' -Server $activeServer -Item $dbName -Severity 'Critical' `
-                -Message ('Nessun backup registrato per il database "{0}".' -f $dbName) -Value 'mai'
-        }
-        else {
-            $ageHours = ((Get-Date) - $lastBackup).TotalHours
-            $sev = 'OK'
-            if ($ageHours -ge [double]$t.BackupAgeHoursCritical) { $sev = 'Critical' }
-            elseif ($ageHours -ge [double]$t.BackupAgeHoursWarning) { $sev = 'Warning' }
-            Add-Finding -Category 'Backup' -Server $activeServer -Item $dbName -Severity $sev `
-                -Message ('Ultimo backup di "{0}": {1:yyyy-MM-dd HH:mm} ({2:N1} ore fa).' -f $dbName, $lastBackup, $ageHours) `
-                -Value ('{0:N1} h' -f $ageHours)
         }
 
         # --- Copia attiva sulla preferenza 1 (bilanciamento del DAG)
