@@ -761,7 +761,7 @@ comunque intercettato, restando sotto quel valore.
 
 Su richiesta esplicita dell'utente (2026-09-23): alcune categorie sono note,
 in questo ambiente, per essere rumorose o poco urgenti (`ActiveSync`,
-`OWA.Calendar.Proxy` e `Imap` come health set Managed Availability, tutta la
+`OWACalendar.Proxy` e `Imap` come health set Managed Availability, tutta la
 categoria `Certificate`), e un early-warning basato solo sulla percentuale
 libera di un disco (indipendente dai GB assoluti) è utile ma non deve avere
 lo stesso peso di un vero Warning/Critical. Aggiunta una quinta severità,
@@ -786,8 +786,16 @@ soglia già esistente, senza bisogno di logica nuova nella macchina a stati.
    `Unknown`: "non so cosa sia successo" non va mai ammorbidito) e la sua
    chiave combacia con un pattern, la severità diventa `LowIssue` prima
    ancora di essere salvata. Default:
-   `ManagedAvailability|*|ActiveSync*`, `ManagedAvailability|*|OWA.Calendar.Proxy*`,
+   `ManagedAvailability|*|ActiveSync*`, `ManagedAvailability|*|OWACalendar.Proxy*`,
    `ManagedAvailability|*|Imap*`, `Certificate|*|*`.
+
+   **Nome esatto verificato contro un `Get-HealthReport` reale**: il nome
+   dell'health set riportato da questa versione di Exchange è
+   `OWACalendar.Proxy` (senza punto tra "OWA" e "Calendar"), non
+   `OWA.Calendar.Proxy` come da convenzione teorica ipotizzata inizialmente
+   (§3, discussione sugli health set) — il pattern di default è stato
+   corretto di conseguenza in v1.18.1, dopo che il primo tentativo (v1.18.0)
+   non declassava nulla perché il pattern non trovava mai una corrispondenza.
 
    **Rischio esplicito, accettato su richiesta diretta dell'utente**: la
    voce `Certificate|*|*` declassa **qualunque** finding di quella categoria,

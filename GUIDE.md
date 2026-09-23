@@ -394,7 +394,7 @@ l'attesa.
 
 **Vedo una nuova severità "Low Issue" (colore ambra) — cos'è?**
 È un livello sotto Warning, pensato per anomalie note come poco urgenti in
-questo ambiente: gli health set `ActiveSync`, `OWA.Calendar.Proxy` e `Imap`
+questo ambiente: gli health set `ActiveSync`, `OWACalendar.Proxy` e `Imap`
 (Managed Availability) e l'intera categoria `Certificate` vengono sempre
 mostrati come Low Issue invece di Warning/Critical (configurabile in
 `LowIssueKeys`), e un disco con meno del 7% di spazio libero — anche se in

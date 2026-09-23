@@ -140,7 +140,7 @@
   "ExtraServices": ["W3SVC", "WinRM"],
   "LowIssueKeys": [
     "ManagedAvailability|*|ActiveSync*",
-    "ManagedAvailability|*|OWA.Calendar.Proxy*",
+    "ManagedAvailability|*|OWACalendar.Proxy*",
     "ManagedAvailability|*|Imap*",
     "Certificate|*|*"
   ],

@@ -1,4 +1,4 @@
-# Versione script: 1.18.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.18.1 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.18.0 (2026-09-23)
+    Versione script: 1.18.1 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.18.0'
+$script:ScriptVersion  = '1.18.1'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -189,7 +189,7 @@ $DefaultConfigJson = @'
   "ExtraServices": ["W3SVC", "WinRM"],
   "LowIssueKeys": [
     "ManagedAvailability|*|ActiveSync*",
-    "ManagedAvailability|*|OWA.Calendar.Proxy*",
+    "ManagedAvailability|*|OWACalendar.Proxy*",
     "ManagedAvailability|*|Imap*",
     "Certificate|*|*"
   ],
