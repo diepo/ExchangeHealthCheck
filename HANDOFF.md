@@ -844,6 +844,18 @@ aperte", tutte popolate da `$AlertResult`) — solo nei conteggi aggregati di
 proprio perché le LowIssue non ci finiscono mai), posizionata dopo "Anomalie
 ancora aperte" e prima di "Rientrate".
 
+**Bug reale trovato in produzione subito dopo il rilascio, corretto in
+v1.19.1** (§5 riga 24): un finding già tracciato come Warning/Critical da
+prima (o comunque abbastanza a lungo da avere un `LastNotified`) che scende a
+`LowIssue` veniva mostrato come "rientrato" nella mail, pur essendo ancora
+`Unhealthy` — osservato con 45 casi reali (`ActiveSync.Protocol`,
+`Imap.Protocol`, `Certificate`). Causa: `$active`/`$activeKeys` (da cui
+dipende il rilevamento dei rientri) usava la stessa soglia
+`MinimumSeverityToMail` della decisione "notifico o no", e `LowIssue` sta
+sotto quella soglia per progetto. Corretto separando le due soglie: vedi bug
+#24 in §5 per il dettaglio implementativo (`$trackRank` vs
+`$meetsMailThreshold`).
+
 Verificato con un test dedicato sotto Windows PowerShell 5.1 reale: ordine
 dei rank, declassamento per le 4 chiavi di default (e non-declassamento per
 categorie/item simili ma non in lista), il caso disco enorme (5%/500GB →
@@ -905,6 +917,7 @@ pubblico, cronologici.
 | 21 | Dopo il fix del bug 20, `Access is denied` comparso su `Get-Queue` su **tutti** i server (prima non succedeva), e `ManagedAvailability` diventato lento, nello stesso ambiente senza `Organization.ConnectTo` | Il fix del bug 20 riconosce il sintomo per impronta del messaggio ovunque compaia, ma `Invoke-HcExchangeWithTimeout` (usata da Certificate/ManagedAvailability/Get-ServerHealth) lo produce **sempre**, deterministicamente, in un ambiente senza ConnectTo ne snap-in: il job che apre gira in un processo nuovo che non eredita la sessione esterna del processo principale, quindi non ha modo di autenticarsi da solo. Il recupero del bug 20, innescato da questo fallimento strutturale (non da una sessione davvero stale), rimuoveva il modulo Exchange condiviso e valido della sessione esterna - da cui `Access is denied` su `Get-Queue` e altri check che non c'entravano nulla con Certificate/ManagedAvailability, e la lentezza (ogni job impiega secondi per fallire nel modo sbagliato) | Quando ne snap-in ne ConnectTo sono disponibili, `Invoke-HcExchangeWithTimeout` salta il job e chiama il cmdlet diretto nel processo corrente (§3.11), dove i cmdlet della sessione esterna sono gia disponibili: il fallimento deterministico non si presenta piu, quindi il recupero del bug 20 non viene piu innescato da questa causa |
 | 22 | Il check "copia attiva fuori preferenza 1" (§3.18) non generava mai un finding `Activation`, nemmeno con database volutamente attivi su una copia diversa dalla preferenza 1 | `ActivationPreference` e' un `IDictionary`; `@($db.ActivationPreference)` non lo srotola in coppie chiave/valore (trattato come un singolo oggetto scalare, comportamento PowerShell per qualunque `IDictionary`), quindi `$prefs.Count` restava sempre 1 e la condizione `-gt 1` non era mai vera | Enumerazione tramite `.Keys` (un `ICollection` normale) e lettura del valore con l'indicizzatore (`$db.ActivationPreference[$server]`), sia nel check esistente sia nella nuova `Initialize-HcServersWithDatabaseCopy` (§3.20) scritta con lo stesso pattern |
 | 23 | Il giro rallentava percettibilmente subito prima di iniziare i check ManagedAvailability per-server, su ogni esecuzione | La prima versione della soppressione dinamica di Search (§3.20) faceva una query ``Get-MailboxDatabase`` **senza** filtro server, una volta per ogni giro, indipendentemente dal fatto che servisse davvero (nella maggior parte dei giri Search e' gia' Healthy ovunque e la soppressione non serve a nulla) | Query resa pigra e per-singolo-server: ``Test-HcServerHasDatabaseCopy`` interroga ``Get-MailboxDatabase -Server X`` solo quando esiste davvero un health set Unhealthy/Degraded che la richiede, con risultato cached per server per lo stesso giro |
+| 24 | Un finding gia' tracciato come Warning/Critical (es. un health set Unhealthy da giorni) veniva mostrato nella sezione "Rientrate" della mail non appena declassato a LowIssue (§3.23), pur essendo ancora attivo (45 casi osservati in un giro reale: ActiveSync.Protocol, Imap.Protocol, Certificate ancora Unhealthy/DateInvalid segnalati come rientrati) | ``Resolve-HcAlert`` usava la stessa soglia (``MinimumSeverityToMail``) sia per decidere "e' abbastanza attivo da tracciare" (``$active``/``$activeKeys``, da cui dipende il rilevamento dei rientri) sia per "e' abbastanza grave da notificare": un LowIssue (rank 2) scende sotto quella soglia (Warning, rank 3), sparisce da ``$activeKeys`` pur essendo ancora presente nei finding, e la sua chiave preesistente in ``State.Alerts`` risulta quindi "non piu' attiva" = rientrata | Le due soglie separate: ``$trackRank`` (il minimo tra ``MinimumSeverityToMail`` e il rank di ``LowIssue``) decide chi resta in ``$active``/``$activeKeys`` (protegge dai falsi rientri), mentre ``$meetsMailThreshold`` (per singolo finding, confrontato con ``MinimumSeverityToMail`` invariato) decide se puo' finire in New/Escalated/Reminders. Un finding sotto soglia resta tracciato (niente falso rientro, niente falsa notifica) ma non genera mai una mail |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

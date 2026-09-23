@@ -1,4 +1,4 @@
-# Versione script: 1.19.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.19.1 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.19.0 (2026-09-23)
+    Versione script: 1.19.1 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.19.0'
+$script:ScriptVersion  = '1.19.1'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -2376,9 +2376,24 @@ function Resolve-HcAlert {
     $sustainedMinutes    = [double]$script:Config.Alerting.SustainedDurationMinutes
     $sustainedCategories = @($script:Config.Alerting.SustainedCategories)
 
+    # "Attivo" (tracciato, protetto da falsi "rientro") e "abbastanza grave da
+    # notificare via mail" sono due soglie diverse, non la stessa cosa. Prima
+    # di LowIssue coincidevano sempre (tutto cio' che non raggiungeva
+    # MinimumSeverityToMail non veniva mai tracciato nemmeno una volta, quindi
+    # non poteva mai "rientrare" da uno stato che non aveva mai avuto). Con
+    # LowIssue un finding puo' essere GIA' tracciato come Warning/Critical (da
+    # prima che la sua chiave fosse aggiunta a LowIssueKeys, o semplicemente
+    # perche' la severita' e' scesa) e ricomparire con severita' piu' bassa: se
+    # $active usasse ancora $minRank, sparirebbe da $activeKeys e verrebbe
+    # segnalato come "rientrato" (bug reale osservato: 45 finding ManagedAvailability/
+    # Certificate ancora Unhealthy mostrati come rientri solo perche' declassati
+    # a LowIssue). $trackRank usa la soglia piu' bassa tra le due, cosi' un
+    # LowIssue resta "attivo" (niente falso rientro) ma la notifica vera resta
+    # gated da $minRank piu' sotto, per ogni finding singolarmente.
+    $trackRank = [Math]::Min($minRank, (Get-SeverityRank 'LowIssue'))
     $active = @($Findings | Where-Object {
         $rank = Get-SeverityRank $_.Severity
-        ($rank -ge $minRank) -and ($notifyUnk -or $_.Severity -ne 'Unknown')
+        ($rank -ge $trackRank) -and ($notifyUnk -or $_.Severity -ne 'Unknown')
     })
 
     $newAlerts      = New-Object System.Collections.Generic.List[object]
@@ -2403,8 +2418,28 @@ function Resolve-HcAlert {
             }
         }
 
+        # Soglia di notifica vera e propria (MinimumSeverityToMail), valutata
+        # per singolo finding: un LowIssue resta "attivo" (sopra) ma non deve
+        # mai finire in New/Escalated/Reminders, ne' alla prima comparsa ne'
+        # se scende qui da una severita' piu' alta gia' notificata prima.
+        $meetsMailThreshold = ((Get-SeverityRank $finding.Severity) -ge $minRank)
+
         if ($null -eq $previous) {
-            if ($requiresSustain -and -not $ForceMail) {
+            if (-not $meetsMailThreshold) {
+                # Sotto soglia fin dalla prima comparsa (es. LowIssue): si
+                # traccia comunque, cosi' non risultera' un falso "rientro" se
+                # in futuro sale di severita' o torna sotto minRank, ma non si
+                # notifica mai.
+                $entry = [pscustomobject]@{
+                    FirstSeen    = $now
+                    LastSeen     = $now
+                    LastNotified = $null
+                    Severity     = $finding.Severity
+                    Occurrences  = 1
+                    Message      = $finding.Message
+                }
+            }
+            elseif ($requiresSustain -and -not $ForceMail) {
                 # Prima comparsa: si inizia solo a tracciare da quando e' elevato,
                 # nessuna notifica finche' non supera SustainedDurationMinutes.
                 $entry = [pscustomobject]@{
@@ -2435,7 +2470,12 @@ function Resolve-HcAlert {
             if ($previous.LastNotified) { $lastNotified = ConvertTo-HcSafeDateTime -Value $previous.LastNotified -Context "LastNotified di $key" }
 
             $shouldNotify = $false
-            if ($requiresSustain -and $null -eq $lastNotified) {
+            if (-not $meetsMailThreshold) {
+                # Sceso sotto la soglia di notifica (es. declassato a LowIssue
+                # dopo essere stato Warning/Critical): resta tracciato per non
+                # generare un falso "rientro", ma nessuna notifica.
+            }
+            elseif ($requiresSustain -and $null -eq $lastNotified) {
                 # Ancora in attesa di superare la soglia di durata: nessuna
                 # escalation/reminder finche' non e' mai stato notificato
                 # neanche una prima volta.
