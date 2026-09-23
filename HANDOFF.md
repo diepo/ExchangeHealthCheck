@@ -739,6 +739,24 @@ configurazione senza dover aspettare 2 ore). La soglia è **per categoria**,
 non globale: gli altri health set/categorie (ActiveSync, certificati,
 componenti, ecc.) restano notificati subito come sempre, non solo Replay/Copy.
 
+### 3.22 Soglie ReplayQueue alzate: 20/100 → 4800/5000
+
+Su richiesta esplicita dell'utente (2026-09-23): nell'ambiente reale un valore
+di `ReplayQueueLength` in centinaia (osservato: 148) è risultato normale
+durante la normale attività di replica, non un'anomalia — il default
+`ReplayQueueCritical: 100` era troppo sensibile per questo ambiente e
+generava alert su valori che rientravano da soli. Alzato `ReplayQueueWarning`
+20→**4800** e `ReplayQueueCritical` 100→**5000** in `$DefaultConfigJson`, in
+`ExchangeHealthCheck.config.example.json` e nel config locale.
+
+Da notare il margine stretto tra Warning e Critical (4800/5000, invece del
+rapporto più ampio 20/100 di prima): scelta esplicita dell'utente, non un
+suggerimento di questo sviluppo — il risultato pratico è che c'è pochissimo
+spazio "di preavviso" prima che una coda in crescita passi da Warning a
+Critical. L'incidente reale di DAG5-DB19 (§3.15, §5 riga 19) aveva
+`ReplayQueueLength` a 8576/9609: la nuova soglia Critical (5000) lo avrebbe
+comunque intercettato, restando sotto quel valore.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
