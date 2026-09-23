@@ -603,6 +603,86 @@ config. Il resto del check database (stato di mount, copia attiva fuori
 preferenza 1) resta invariato — il backup era solo una delle tre cose
 verificate da quella funzione, non l'intero check.
 
+### 3.19 Esclusi dai check: dischi virtuali VMware e servizio RemoteRegistry
+
+Su richiesta esplicita dell'utente (2026-09-23), due sorgenti di falsi
+positivi rimosse dai check attivi:
+
+- **Dischi "VMware Virtual disk"** ignorati nel check `PhysicalDisk` (§3.17):
+  su un server virtualizzato, `Get-PhysicalDisk` espone il disco virtuale
+  presentato dall'hypervisor, non lo storage fisico reale sottostante (gestito
+  da vSphere/dalla SAN, fuori dalla visibilità di Windows). Il suo
+  `HealthStatus` non riflette lo stato reale dell'array e genera solo rumore
+  su VM — filtrato per `FriendlyName` esatto in `Get-HcRemoteData`, prima
+  ancora che il disco entri nel finding o nel riepilogo. Sui server fisici
+  (dove il problema §3.17 è nato) il comportamento non cambia: nessun disco
+  reale ha quel `FriendlyName`.
+- **`RemoteRegistry` rimosso da `ExtraServices`**: non più incluso tra i
+  servizi extra monitorati dal check `Service` (§"CHECK SERVIZI" — servizio
+  Automatico ma non in esecuzione ⇒ Critical). Rimosso dal default in
+  `$DefaultConfigJson` e da entrambi i file di config (example + locale): il
+  servizio smette semplicemente di essere raccolto e valutato, nessun cambio
+  di logica nel check stesso, che resta generico per qualunque nome in lista.
+
+### 3.20 Soppressione dinamica di `Search` sui server senza copie di database
+
+Su richiesta esplicita dell'utente (2026-09-23): in un DAG con più membri non
+tutti i server ospitano copie di ogni database, e in ambienti con diversi
+membri "capacità futura" può capitare che un server non ospiti **nessuna**
+copia (né attiva né passiva). In quel caso l'health set `Search` in
+`Unhealthy` non riflette alcun impatto reale — non c'è alcun indice locale da
+mantenere.
+
+**Perché solo `Search` e non gli altri health set citati insieme** (ActiveSync,
+Imap, OWA.Calendar.Proxy, Outlook.Proxy/MapiHttp.Proxy, RemoteMonitoring):
+`Search` è l'unico legato 1:1 alla presenza di copie locali (ogni copia ha il
+suo catalogo). Gli health set `*.Proxy`/protocollo citati sono invece funzioni
+di **front-end**: un server le esercita per qualunque utente dell'organizzazione
+instradato su di lui dal bilanciatore, indipendentemente da quali cassette
+ospita — sopprimerli sulla stessa base rischierebbe di nascondere un incidente
+reale su utenti reali. `RemoteMonitoring` non è legato ai database in alcun
+modo. Nessuno di questi è stato quindi incluso nella soppressione.
+
+**Implementazione**: `Initialize-HcServersWithDatabaseCopy` (nuova funzione,
+eseguita una sola volta prima del loop per-server, solo se il check `Health` è
+abilitato) legge `Get-MailboxDatabase` **senza** `-Server`/`-Status` — una sola
+query di sola configurazione, nessun contatto con i server proprietari — e
+costruisce l'insieme dei server che compaiono nella `ActivationPreference` di
+almeno un database. Fail-open: se la query fallisce, non si sopprime nulla
+(meglio un falso allarme in più che un problema nascosto per un dubbio sulla
+rilevazione). Il nome del server da confrontare (`Target.Name`) e le chiavi
+di `ActivationPreference` vengono entrambi ridotti al nome corto (senza
+suffisso FQDN) prima del confronto.
+
+In `Invoke-HcHealthCheck`, dopo il filtro statico esistente (`Ignore.HealthSets`),
+un secondo filtro dinamico rimuove da `$monitored` gli health set il cui nome
+compare in `Ignore.HealthSetsWithoutDatabaseCopy` (default `["Search"]`,
+pattern con wildcard) quando il server target non ha copie note. Non sparisce
+in silenzio: genera comunque un finding `Info` esplicito ("... ma ignorato:
+X non ospita alcuna copia di database"), visibile per chi controlla i
+finding grezzi, ma senza contribuire a `$bad`/`$degraded` e quindi senza
+alert.
+
+**Bug preesistente scoperto durante l'implementazione** (non introdotto oggi,
+presente da quando la funzione è stata scritta): `ActivationPreference` è un
+`IDictionary` (sia `Hashtable` che `Dictionary` generico) e **PowerShell non lo
+srotola** in coppie chiave/valore quando viene passato a `@()` o a un `foreach`
+diretto — viene trattato come un singolo oggetto scalare (comportamento
+documentato di PowerShell per qualunque tipo che implementa `IDictionary`, non
+solo per gli `Hashtable` letterali). Il check "copia attiva fuori preferenza 1"
+in `Invoke-HcDatabaseCheck` (§3.18) usava esattamente questo pattern
+(`@($db.ActivationPreference)` poi `.Key`/`.Value` in un foreach), quindi il
+suo `$prefs.Count` era sempre 1 e il controllo **non è mai scattato una sola
+volta** da quando è stato scritto — nessun errore visibile, il blocco è
+avvolto in un try/catch che logga solo a livello DEBUG in caso di eccezione,
+e qui non ne genera nessuna. Corretto enumerando `.Keys` (un `ICollection`
+normale, non soggetto allo stesso comportamento) e leggendo il valore tramite
+l'indicizzatore (`$db.ActivationPreference[$server]`) invece di `.Value` su un
+foreach diretto. Stesso fix applicato anche alla nuova
+`Initialize-HcServersWithDatabaseCopy`, scritta da zero in questa stessa
+sessione: il bug è stato notato mentre si scriveva codice nuovo con lo stesso
+pattern e non ha mai raggiunto un commit.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -617,8 +697,8 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
 | `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary` (per server), `ShowDatabasePerDbSummary` (per database, §3.15), `ShowPhysicalDiskSummary` (§3.17), `ShowQueueSummary` |
-| `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets, Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
-| `ExtraServices` | Servizi non-Exchange da includere nel check Services (es. W3SVC, WinRM) |
+| `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets (statico, per nome), HealthSetsWithoutDatabaseCopy (dinamico, solo su server senza copie — §3.20), Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
+| `ExtraServices` | Servizi non-Exchange da includere nel check Services (default W3SVC, WinRM — RemoteRegistry rimosso, §3.19) |
 | `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare |
 | `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12), `IncludeDatabasePerDbSummary` (§3.15), `IncludePhysicalDiskSummary` (§3.17) |
 | `Paths` | Cartelle di log/report/stato, retention |
@@ -653,6 +733,7 @@ pubblico, cronologici.
 | 19 | Un database reale (DAG5-DB19) aveva una copia con `Status Healthy` ma `ReplayQueueLength 8576` (soglia critica di default 100): il finding `ReplayQueue` era gia Critical tra i Findings, ma sia il riepilogo per server sia quello per database (§3.15) mostravano quella riga come sana, senza alcun segnale | La severita usata nei due riepiloghi aggregati veniva calcolata **solo** dallo Status testuale della copia (`Healthy`/`Seeding`/`Suspended`/...); `Status: Healthy` descrive solo che il meccanismo di copia funziona, non che la copia sia allineata - CopyQueueLength/ReplayQueueLength non entravano mai nel calcolo di quella severita, restavano confinati al loro finding dedicato | La severita per riga (sia per-server sia per-database) e ora il massimo tra severita di stato, severita copy queue e severita replay queue; il `ProblemDetail` per-server mostra esplicitamente "Healthy ma code indietro (copy=X, replay=Y)" invece di limitarsi a ripetere lo Status; il riepilogo per database mostra sempre `RQ:<valore>` per le copie non attive (non solo quando fuori soglia) e aggiunge `Suspend:"..."` quando presente |
 | 20 | Il fix §3.13 (stale-session repair) non risolveva il sintomo per un utente con `Organization.ConnectTo` **non configurato**: `Cannot bind parameter 'ConnectionUri' ... hostname could not be parsed` continuava a presentarsi identico dopo il fix | §3.13 traccia e ripara solo `$script:ExSession`, popolata unicamente quando e `Connect-HcExchange` (di questo script) ad aprire la sessione remota. Ma se `Organization.ConnectTo` non serve perche lo script gira dentro una Exchange Management Shell o una sessione aperta a mano con `Connect-ExchangeServer`/`RemoteExchange.ps1` **prima** di lanciare lo script, `Test-HcCommand 'Get-ExchangeServer'` trova i cmdlet gia disponibili, `Connect-HcExchange` non fa nulla, e `$script:ExSession` resta `$null` per l'intero giro: lo script non ha alcuna visibilita sulla sessione esterna e non puo mai sapere che e caduta | §3.16: recupero reattivo e origin-agnostic in `Invoke-HcCheck`, che non dipende dal tracciare una sessione specifica |
 | 21 | Dopo il fix del bug 20, `Access is denied` comparso su `Get-Queue` su **tutti** i server (prima non succedeva), e `ManagedAvailability` diventato lento, nello stesso ambiente senza `Organization.ConnectTo` | Il fix del bug 20 riconosce il sintomo per impronta del messaggio ovunque compaia, ma `Invoke-HcExchangeWithTimeout` (usata da Certificate/ManagedAvailability/Get-ServerHealth) lo produce **sempre**, deterministicamente, in un ambiente senza ConnectTo ne snap-in: il job che apre gira in un processo nuovo che non eredita la sessione esterna del processo principale, quindi non ha modo di autenticarsi da solo. Il recupero del bug 20, innescato da questo fallimento strutturale (non da una sessione davvero stale), rimuoveva il modulo Exchange condiviso e valido della sessione esterna - da cui `Access is denied` su `Get-Queue` e altri check che non c'entravano nulla con Certificate/ManagedAvailability, e la lentezza (ogni job impiega secondi per fallire nel modo sbagliato) | Quando ne snap-in ne ConnectTo sono disponibili, `Invoke-HcExchangeWithTimeout` salta il job e chiama il cmdlet diretto nel processo corrente (§3.11), dove i cmdlet della sessione esterna sono gia disponibili: il fallimento deterministico non si presenta piu, quindi il recupero del bug 20 non viene piu innescato da questa causa |
+| 22 | Il check "copia attiva fuori preferenza 1" (§3.18) non generava mai un finding `Activation`, nemmeno con database volutamente attivi su una copia diversa dalla preferenza 1 | `ActivationPreference` e' un `IDictionary`; `@($db.ActivationPreference)` non lo srotola in coppie chiave/valore (trattato come un singolo oggetto scalare, comportamento PowerShell per qualunque `IDictionary`), quindi `$prefs.Count` restava sempre 1 e la condizione `-gt 1` non era mai vera | Enumerazione tramite `.Keys` (un `ICollection` normale) e lettura del valore con l'indicizzatore (`$db.ActivationPreference[$server]`), sia nel check esistente sia nella nuova `Initialize-HcServersWithDatabaseCopy` (§3.20) scritta con lo stesso pattern |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

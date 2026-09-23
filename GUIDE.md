@@ -16,7 +16,7 @@ Repository: https://github.com/diepo/ExchangeHealthCheck
 | Connettività | Server raggiungibile via WinRM/CIM |
 | Sistema operativo | Uptime, reboot in sospeso, memoria, CPU |
 | Disco | Spazio libero su ogni volume, incluse le mount point senza lettera |
-| Dischi fisici | Stato di salute di ogni disco (`Get-PhysicalDisk`): Healthy/Warning/Unhealthy |
+| Dischi fisici | Stato di salute di ogni disco fisico (`Get-PhysicalDisk`): Healthy/Warning/Unhealthy. Su VM i dischi virtuali dell'hypervisor ("VMware Virtual disk") sono esclusi: non riflettono lo storage fisico reale |
 | Servizi | Servizi Exchange fermi che dovrebbero essere in esecuzione |
 | Componenti | Server lasciato in maintenance mode dopo un patching |
 | Managed Availability | Health set non sani, con i monitor coinvolti in dettaglio |
@@ -363,6 +363,19 @@ una soglia propria, più alta (`Thresholds.QueueTotalWarning`/
 sull'intero server; la soglia per singola coda (`QueueWarning`/
 `QueueCritical`) resta quella di prima e continua a segnalare subito una coda
 davvero bloccata.
+
+**L'health set "Search" è Unhealthy su un server, ma non ha nessuna copia di database**
+Non è un errore: se un server non ospita nessuna copia di database (né attiva
+né passiva), non c'è alcun indice di ricerca locale da mantenere, quindi
+l'health set non riflette alcun impatto reale. Lo script riconosce
+automaticamente questo caso e non genera più un alert Critical/Warning per
+`Search` in questa situazione — resta comunque visibile come finding `Info`
+tra i dettagli, per trasparenza, ma senza scatenare una notifica. Configurabile
+in `Ignore.HealthSetsWithoutDatabaseCopy` (default: solo `Search`). Gli altri
+health set di tipo proxy/protocollo (ActiveSync, Imap, OWA.Calendar.Proxy,
+Outlook.Proxy/MapiHttp.Proxy) **non** vengono soppressi allo stesso modo: sono
+funzioni di front-end che un server esercita per qualunque utente
+dell'organizzazione, non solo per le cassette che ospita localmente.
 
 ## 8. Sicurezza e privacy dei dati
 

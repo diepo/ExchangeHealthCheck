@@ -1,4 +1,4 @@
-# Versione script: 1.11.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.13.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.11.0 (2026-09-23)
+    Versione script: 1.13.0 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.11.0'
+$script:ScriptVersion  = '1.13.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -90,6 +90,8 @@ $script:DatabaseCopySummary = New-Object System.Collections.Generic.List[object]
 $script:DatabaseCopyDetail  = New-Object System.Collections.Generic.List[object]
 $script:DatabaseSummary     = @()
 $script:PhysicalDiskSummary = New-Object System.Collections.Generic.List[object]
+$script:ServersWithDatabaseCopy      = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+$script:ServersWithDatabaseCopyKnown = $false
 $script:LogFile        = $null
 $script:ExSession      = $null
 $script:CheckFilter    = $Check
@@ -180,11 +182,12 @@ $DefaultConfigJson = @'
     "Services": ["MSExchangePOP3", "MSExchangePOP3BE", "MSExchangeIMAP4", "MSExchangeIMAP4BE", "MSExchangeEdgeSync"],
     "ServerComponents": ["ForwardSyncDaemon", "ProvisioningRps"],
     "HealthSets": ["FfoQuarantine", "Monitoring", "OutsideInHealth", "Imap", "Pop"],
+    "HealthSetsWithoutDatabaseCopy": ["Search"],
     "Volumes": [],
     "Databases": [],
     "Keys": []
   },
-  "ExtraServices": ["W3SVC", "WinRM", "RemoteRegistry"],
+  "ExtraServices": ["W3SVC", "WinRM"],
   "Alerting": {
     "CooldownMinutes": 120,
     "SendRecovery": true,
@@ -886,6 +889,11 @@ function Get-HcRemoteData {
         $physicalDisks = @()
         if (Get-Command -Name Get-PhysicalDisk -ErrorAction SilentlyContinue) {
             foreach ($disk in (Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+                # Su una VM il "disco fisico" e' in realta' un disco virtuale
+                # esposto dall'hypervisor: HealthStatus non riflette lo stato
+                # dello storage fisico sottostante (gestito da vSphere/SAN, non
+                # da Windows) e genera solo falsi segnali su server virtualizzati.
+                if ([string]$disk.FriendlyName -eq 'VMware Virtual disk') { continue }
                 $physicalDisks += [pscustomobject]@{
                     DeviceId          = [string]$disk.DeviceId
                     FriendlyName      = [string]$disk.FriendlyName
@@ -1295,6 +1303,44 @@ function Get-HcHealthSetDetail {
     return $text
 }
 
+# Alcuni health set (Search) hanno senso solo su un server che ospita almeno
+# una copia di database (attiva o passiva): senza copie locali non c'e' alcun
+# indice da mantenere, e l'health set Unhealthy non riflette alcun impatto
+# reale. Altri health set richiesti spesso insieme (ActiveSync, Imap,
+# OWA.Calendar.Proxy, Outlook.Proxy/MapiHttp.Proxy) sono invece funzioni di
+# proxy/front-end: un server le esercita per QUALSIASI utente dell'org, non
+# solo per le cassette che ospita, quindi lo stesso criterio non si applica e
+# di proposito qui non vengono trattati allo stesso modo.
+#
+# Popolato una sola volta con una singola query di sola configurazione
+# (nessun -Server, nessun -Status: legge ActivationPreference dagli oggetti
+# database in AD, senza contattare i server proprietari). Se la query fallisce
+# si sceglie di non sopprimere nulla (fail-open): meglio un falso allarme in
+# piu' che nascondere un problema reale perche' non siamo riusciti a stabilire
+# se il server ha copie.
+function Initialize-HcServersWithDatabaseCopy {
+    $script:ServersWithDatabaseCopy.Clear()
+    if (-not (Test-HcCommand 'Get-MailboxDatabase')) { return }
+    try {
+        $allDatabases = @(Get-MailboxDatabase -ErrorAction Stop)
+        foreach ($db in $allDatabases) {
+            # ActivationPreference e' un IDictionary: @()/foreach diretto su di
+            # esso NON lo srotola in coppie chiave/valore in PowerShell (viene
+            # trattato come un singolo oggetto scalare, sia per Hashtable che
+            # per Dictionary generico) - va enumerato tramite .Keys.
+            foreach ($server in @($db.ActivationPreference.Keys)) {
+                $shortName = ([string]$server -split '\.')[0]
+                if ($shortName) { [void]$script:ServersWithDatabaseCopy.Add($shortName) }
+            }
+        }
+        $script:ServersWithDatabaseCopyKnown = $true
+    }
+    catch {
+        Write-HcLog ('Impossibile determinare quali server ospitano copie di database: {0}. Nessun health set verra'' escluso su questa base.' -f $_.Exception.Message) -Level WARN
+        $script:ServersWithDatabaseCopyKnown = $false
+    }
+}
+
 function Invoke-HcHealthCheck {
     param([object]$Target)
 
@@ -1347,6 +1393,32 @@ function Invoke-HcHealthCheck {
         }
         -not $skip
     })
+
+    # Secondo filtro, dinamico per server: alcuni health set (Search, vedi
+    # Initialize-HcServersWithDatabaseCopy) non hanno impatto reale su un
+    # server che non ospita nessuna copia di database. Applicato solo se la
+    # rilevazione e' riuscita (fail-open: in caso di dubbio non si sopprime).
+    $noCopyPatterns = @($script:Config.Ignore.HealthSetsWithoutDatabaseCopy)
+    $targetShortName = ($Target.Name -split '\.')[0]
+    $hasDbCopy = $script:ServersWithDatabaseCopy.Contains($targetShortName)
+    $notApplicable = @()
+    if ($script:ServersWithDatabaseCopyKnown -and -not $hasDbCopy -and $noCopyPatterns.Count -gt 0) {
+        $applicable = @()
+        foreach ($entry in $monitored) {
+            $matches = $false
+            foreach ($pattern in $noCopyPatterns) {
+                if ($pattern -and $entry.Name -like $pattern) { $matches = $true; break }
+            }
+            if ($matches) { $notApplicable += $entry } else { $applicable += $entry }
+        }
+        $monitored = $applicable
+    }
+
+    foreach ($hs in ($notApplicable | Where-Object { $_.AlertValue -in @('Unhealthy', 'Degraded') })) {
+        Add-Finding -Category 'ManagedAvailability' -Server $Target.Name -Item $hs.Name -Severity 'Info' `
+            -Message ('Health set "{0}" {1}, ma ignorato: {2} non ospita alcuna copia di database (nessun impatto reale possibile).' -f $hs.Name, $hs.AlertValue, $Target.Name) `
+            -Value $hs.AlertValue
+    }
 
     $bad      = @($monitored | Where-Object { $_.AlertValue -eq 'Unhealthy' })
     $degraded = @($monitored | Where-Object { $_.AlertValue -eq 'Degraded' })
@@ -1776,12 +1848,16 @@ function Invoke-HcDatabaseCheck {
         }
 
         # --- Copia attiva sulla preferenza 1 (bilanciamento del DAG)
+        # ActivationPreference e' un IDictionary: @() su di esso NON lo
+        # srotola in coppie chiave/valore (viene trattato come un singolo
+        # oggetto scalare), quindi va enumerato tramite .Keys e letto con
+        # l'indicizzatore - non con .Key/.Value su un foreach diretto.
         try {
-            $prefs = @($db.ActivationPreference)
-            if ($prefs.Count -gt 1) {
+            $prefKeys = @($db.ActivationPreference.Keys)
+            if ($prefKeys.Count -gt 1) {
                 $preferred = $null
-                foreach ($pref in $prefs) {
-                    if ([int]$pref.Value -eq 1) { $preferred = ([string]$pref.Key -split '\.')[0]; break }
+                foreach ($server in $prefKeys) {
+                    if ([int]$db.ActivationPreference[$server] -eq 1) { $preferred = ([string]$server -split '\.')[0]; break }
                 }
                 if ($preferred -and $preferred -ne ($activeServer -split '\.')[0]) {
                     Add-Finding -Category 'Activation' -Server $activeServer -Item $dbName -Severity 'Info' `
@@ -3150,6 +3226,8 @@ try {
 
     # --- Aggancio a un DC del dominio dei server (solo se non ne e stato imposto uno)
     Set-HcAutoDomainController -Targets $targets
+
+    if (Test-CheckEnabled 'Health') { Initialize-HcServersWithDatabaseCopy }
 
     # --- Dati OS in parallelo
     $remoteData = @{}
