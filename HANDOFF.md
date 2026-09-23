@@ -643,25 +643,24 @@ ospita — sopprimerli sulla stessa base rischierebbe di nascondere un incidente
 reale su utenti reali. `RemoteMonitoring` non è legato ai database in alcun
 modo. Nessuno di questi è stato quindi incluso nella soppressione.
 
-**Implementazione**: `Initialize-HcServersWithDatabaseCopy` (nuova funzione,
-eseguita una sola volta prima del loop per-server, solo se il check `Health` è
-abilitato) legge `Get-MailboxDatabase` **senza** `-Server`/`-Status` — una sola
-query di sola configurazione, nessun contatto con i server proprietari — e
-costruisce l'insieme dei server che compaiono nella `ActivationPreference` di
-almeno un database. Fail-open: se la query fallisce, non si sopprime nulla
-(meglio un falso allarme in più che un problema nascosto per un dubbio sulla
-rilevazione). Il nome del server da confrontare (`Target.Name`) e le chiavi
-di `ActivationPreference` vengono entrambi ridotti al nome corto (senza
-suffisso FQDN) prima del confronto.
+**Implementazione (pigra, per-server — vedi bug #23)**: `Test-HcServerHasDatabaseCopy`
+interroga `Get-MailboxDatabase -Server <nome>` (senza `-Status`: filtro lato AD,
+nessun contatto con il server) solo per il singolo server richiesto, e solo
+quando serve davvero — cioè solo se in `Invoke-HcHealthCheck` esiste almeno un
+health set il cui nome compare in `Ignore.HealthSetsWithoutDatabaseCopy`
+(default `["Search"]`) **e** il cui `AlertValue` è Unhealthy/Degraded. Nella
+maggior parte dei giri (Search Healthy ovunque) questa funzione non viene mai
+chiamata: zero query aggiuntive. Il risultato è cached per server
+(`$script:ServerHasDatabaseCopyCache`) per non ripetere la query se lo stesso
+server viene rivalutato più volte nello stesso giro. Fail-open: se la query
+fallisce, non si sopprime nulla per quel server (meglio un falso allarme in
+più che un problema nascosto per un dubbio sulla rilevazione).
 
-In `Invoke-HcHealthCheck`, dopo il filtro statico esistente (`Ignore.HealthSets`),
-un secondo filtro dinamico rimuove da `$monitored` gli health set il cui nome
-compare in `Ignore.HealthSetsWithoutDatabaseCopy` (default `["Search"]`,
-pattern con wildcard) quando il server target non ha copie note. Non sparisce
-in silenzio: genera comunque un finding `Info` esplicito ("... ma ignorato:
-X non ospita alcuna copia di database"), visibile per chi controlla i
-finding grezzi, ma senza contribuire a `$bad`/`$degraded` e quindi senza
-alert.
+Il filtro in `Invoke-HcHealthCheck` non fa sparire nulla in silenzio: gli
+health set soppressi generano comunque un finding `Info` esplicito ("...
+ma ignorato: X non ospita alcuna copia di database"), visibile per chi
+controlla i finding grezzi, ma senza contribuire a `$bad`/`$degraded` e
+quindi senza alert.
 
 **Bug preesistente scoperto durante l'implementazione** (non introdotto oggi,
 presente da quando la funzione è stata scritta): `ActivationPreference` è un
@@ -734,6 +733,7 @@ pubblico, cronologici.
 | 20 | Il fix §3.13 (stale-session repair) non risolveva il sintomo per un utente con `Organization.ConnectTo` **non configurato**: `Cannot bind parameter 'ConnectionUri' ... hostname could not be parsed` continuava a presentarsi identico dopo il fix | §3.13 traccia e ripara solo `$script:ExSession`, popolata unicamente quando e `Connect-HcExchange` (di questo script) ad aprire la sessione remota. Ma se `Organization.ConnectTo` non serve perche lo script gira dentro una Exchange Management Shell o una sessione aperta a mano con `Connect-ExchangeServer`/`RemoteExchange.ps1` **prima** di lanciare lo script, `Test-HcCommand 'Get-ExchangeServer'` trova i cmdlet gia disponibili, `Connect-HcExchange` non fa nulla, e `$script:ExSession` resta `$null` per l'intero giro: lo script non ha alcuna visibilita sulla sessione esterna e non puo mai sapere che e caduta | §3.16: recupero reattivo e origin-agnostic in `Invoke-HcCheck`, che non dipende dal tracciare una sessione specifica |
 | 21 | Dopo il fix del bug 20, `Access is denied` comparso su `Get-Queue` su **tutti** i server (prima non succedeva), e `ManagedAvailability` diventato lento, nello stesso ambiente senza `Organization.ConnectTo` | Il fix del bug 20 riconosce il sintomo per impronta del messaggio ovunque compaia, ma `Invoke-HcExchangeWithTimeout` (usata da Certificate/ManagedAvailability/Get-ServerHealth) lo produce **sempre**, deterministicamente, in un ambiente senza ConnectTo ne snap-in: il job che apre gira in un processo nuovo che non eredita la sessione esterna del processo principale, quindi non ha modo di autenticarsi da solo. Il recupero del bug 20, innescato da questo fallimento strutturale (non da una sessione davvero stale), rimuoveva il modulo Exchange condiviso e valido della sessione esterna - da cui `Access is denied` su `Get-Queue` e altri check che non c'entravano nulla con Certificate/ManagedAvailability, e la lentezza (ogni job impiega secondi per fallire nel modo sbagliato) | Quando ne snap-in ne ConnectTo sono disponibili, `Invoke-HcExchangeWithTimeout` salta il job e chiama il cmdlet diretto nel processo corrente (§3.11), dove i cmdlet della sessione esterna sono gia disponibili: il fallimento deterministico non si presenta piu, quindi il recupero del bug 20 non viene piu innescato da questa causa |
 | 22 | Il check "copia attiva fuori preferenza 1" (§3.18) non generava mai un finding `Activation`, nemmeno con database volutamente attivi su una copia diversa dalla preferenza 1 | `ActivationPreference` e' un `IDictionary`; `@($db.ActivationPreference)` non lo srotola in coppie chiave/valore (trattato come un singolo oggetto scalare, comportamento PowerShell per qualunque `IDictionary`), quindi `$prefs.Count` restava sempre 1 e la condizione `-gt 1` non era mai vera | Enumerazione tramite `.Keys` (un `ICollection` normale) e lettura del valore con l'indicizzatore (`$db.ActivationPreference[$server]`), sia nel check esistente sia nella nuova `Initialize-HcServersWithDatabaseCopy` (§3.20) scritta con lo stesso pattern |
+| 23 | Il giro rallentava percettibilmente subito prima di iniziare i check ManagedAvailability per-server, su ogni esecuzione | La prima versione della soppressione dinamica di Search (§3.20) faceva una query ``Get-MailboxDatabase`` **senza** filtro server, una volta per ogni giro, indipendentemente dal fatto che servisse davvero (nella maggior parte dei giri Search e' gia' Healthy ovunque e la soppressione non serve a nulla) | Query resa pigra e per-singolo-server: ``Test-HcServerHasDatabaseCopy`` interroga ``Get-MailboxDatabase -Server X`` solo quando esiste davvero un health set Unhealthy/Degraded che la richiede, con risultato cached per server per lo stesso giro |
 
 ## 6. Verificato vs. non verificato contro Exchange reale
 

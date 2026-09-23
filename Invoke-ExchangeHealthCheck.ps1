@@ -1,4 +1,4 @@
-# Versione script: 1.13.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.14.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.13.0 (2026-09-23)
+    Versione script: 1.14.0 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.13.0'
+$script:ScriptVersion  = '1.14.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -90,8 +90,6 @@ $script:DatabaseCopySummary = New-Object System.Collections.Generic.List[object]
 $script:DatabaseCopyDetail  = New-Object System.Collections.Generic.List[object]
 $script:DatabaseSummary     = @()
 $script:PhysicalDiskSummary = New-Object System.Collections.Generic.List[object]
-$script:ServersWithDatabaseCopy      = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-$script:ServersWithDatabaseCopyKnown = $false
 $script:LogFile        = $null
 $script:ExSession      = $null
 $script:CheckFilter    = $Check
@@ -1312,33 +1310,38 @@ function Get-HcHealthSetDetail {
 # solo per le cassette che ospita, quindi lo stesso criterio non si applica e
 # di proposito qui non vengono trattati allo stesso modo.
 #
-# Popolato una sola volta con una singola query di sola configurazione
-# (nessun -Server, nessun -Status: legge ActivationPreference dagli oggetti
-# database in AD, senza contattare i server proprietari). Se la query fallisce
-# si sceglie di non sopprimere nulla (fail-open): meglio un falso allarme in
-# piu' che nascondere un problema reale perche' non siamo riusciti a stabilire
-# se il server ha copie.
-function Initialize-HcServersWithDatabaseCopy {
-    $script:ServersWithDatabaseCopy.Clear()
-    if (-not (Test-HcCommand 'Get-MailboxDatabase')) { return }
+# Interrogazione pigra e per-singolo-server, non un'unica query org-wide
+# eseguita ad ogni giro: nella stragrande maggioranza dei casi Search e' gia'
+# Healthy ovunque, quindi questa funzione non deve essere chiamata affatto.
+# "-Server X" (senza -Status) filtra lato AD sul solo server richiesto, molto
+# piu' leggero di un Get-MailboxDatabase senza filtro su tutta l'org - la
+# prima versione di questa funzione faceva quella query una volta per giro,
+# sempre, anche quando non serviva mai: era la causa di un rallentamento
+# osservato dall'utente prima ancora dell'inizio del loop per-server.
+# Risultato cached per server per evitare ripetizioni nello stesso giro.
+# Fail-open: se la query fallisce si sceglie di non sopprimere (meglio un
+# falso allarme in piu' che nascondere un problema reale).
+$script:ServerHasDatabaseCopyCache = @{}
+function Test-HcServerHasDatabaseCopy {
+    param([string]$ServerName)
+
+    $shortName = ($ServerName -split '\.')[0]
+    if ($script:ServerHasDatabaseCopyCache.ContainsKey($shortName)) {
+        return $script:ServerHasDatabaseCopyCache[$shortName]
+    }
+    if (-not (Test-HcCommand 'Get-MailboxDatabase')) { return $true }
+
+    $result = $true
     try {
-        $allDatabases = @(Get-MailboxDatabase -ErrorAction Stop)
-        foreach ($db in $allDatabases) {
-            # ActivationPreference e' un IDictionary: @()/foreach diretto su di
-            # esso NON lo srotola in coppie chiave/valore in PowerShell (viene
-            # trattato come un singolo oggetto scalare, sia per Hashtable che
-            # per Dictionary generico) - va enumerato tramite .Keys.
-            foreach ($server in @($db.ActivationPreference.Keys)) {
-                $shortName = ([string]$server -split '\.')[0]
-                if ($shortName) { [void]$script:ServersWithDatabaseCopy.Add($shortName) }
-            }
-        }
-        $script:ServersWithDatabaseCopyKnown = $true
+        $copies = @(Get-MailboxDatabase -Server $shortName -ErrorAction Stop)
+        $result = ($copies.Count -gt 0)
     }
     catch {
-        Write-HcLog ('Impossibile determinare quali server ospitano copie di database: {0}. Nessun health set verra'' escluso su questa base.' -f $_.Exception.Message) -Level WARN
-        $script:ServersWithDatabaseCopyKnown = $false
+        Write-HcLog ('Impossibile determinare se {0} ospita copie di database: {1}. Nessun health set verra'' escluso su questa base per questo server.' -f $ServerName, $_.Exception.Message) -Level WARN
+        $result = $true
     }
+    $script:ServerHasDatabaseCopyCache[$shortName] = $result
+    return $result
 }
 
 function Invoke-HcHealthCheck {
@@ -1395,23 +1398,26 @@ function Invoke-HcHealthCheck {
     })
 
     # Secondo filtro, dinamico per server: alcuni health set (Search, vedi
-    # Initialize-HcServersWithDatabaseCopy) non hanno impatto reale su un
-    # server che non ospita nessuna copia di database. Applicato solo se la
-    # rilevazione e' riuscita (fail-open: in caso di dubbio non si sopprime).
+    # Test-HcServerHasDatabaseCopy) non hanno impatto reale su un server che
+    # non ospita nessuna copia di database. La query per-server e' pigra: si
+    # esegue solo se c'e' davvero un health set in Unhealthy/Degraded che la
+    # richiede, cioe' quasi mai (nella maggior parte dei giri Search e' gia'
+    # Healthy ovunque).
     $noCopyPatterns = @($script:Config.Ignore.HealthSetsWithoutDatabaseCopy)
-    $targetShortName = ($Target.Name -split '\.')[0]
-    $hasDbCopy = $script:ServersWithDatabaseCopy.Contains($targetShortName)
     $notApplicable = @()
-    if ($script:ServersWithDatabaseCopyKnown -and -not $hasDbCopy -and $noCopyPatterns.Count -gt 0) {
-        $applicable = @()
-        foreach ($entry in $monitored) {
+    if ($noCopyPatterns.Count -gt 0) {
+        $candidates = @($monitored | Where-Object {
+            $entry = $_
             $matches = $false
             foreach ($pattern in $noCopyPatterns) {
                 if ($pattern -and $entry.Name -like $pattern) { $matches = $true; break }
             }
-            if ($matches) { $notApplicable += $entry } else { $applicable += $entry }
+            $matches -and $entry.AlertValue -in @('Unhealthy', 'Degraded')
+        })
+        if ($candidates.Count -gt 0 -and -not (Test-HcServerHasDatabaseCopy -ServerName $Target.Name)) {
+            $notApplicable = $candidates
+            $monitored = @($monitored | Where-Object { $candidates -notcontains $_ })
         }
-        $monitored = $applicable
     }
 
     foreach ($hs in ($notApplicable | Where-Object { $_.AlertValue -in @('Unhealthy', 'Degraded') })) {
@@ -3226,8 +3232,6 @@ try {
 
     # --- Aggancio a un DC del dominio dei server (solo se non ne e stato imposto uno)
     Set-HcAutoDomainController -Targets $targets
-
-    if (Test-CheckEnabled 'Health') { Initialize-HcServersWithDatabaseCopy }
 
     # --- Dati OS in parallelo
     $remoteData = @{}
