@@ -1,4 +1,4 @@
-# Versione script: 1.20.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.21.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.20.0 (2026-09-23)
+    Versione script: 1.21.0 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.20.0'
+$script:ScriptVersion  = '1.21.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -2686,14 +2686,42 @@ function Get-HcMergedFindingRows {
     $groups = $Rows | Group-Object Category, Item, Severity
     return @(foreach ($g in $groups) {
         $first = $g.Group[0]
-        $servers = ($g.Group | Sort-Object Server | ForEach-Object {
+
+        # Se il messaggio incorpora un valore specifico per server (tipico di
+        # Disco: GB/percentuale, diversi da un server all'altro), mostrare
+        # quello del primo server come se valesse per l'intero gruppo e'
+        # fuorviante - se ne accorge confrontando se i messaggi del gruppo
+        # sono davvero tutti identici (Managed Availability/Database/
+        # Certificate lo sono quasi sempre, Disco quasi mai).
+        $uniqueMessages = @($g.Group.Message | Select-Object -Unique)
+        $message = if ($uniqueMessages.Count -le 1) { $first.Message } else { 'Vedi il valore specifico per ciascun server nella colonna Server.' }
+
+        # Ordina i server per il numero iniziale di Value crescente quando
+        # possibile (es. "31.4 GB / 13.4%" -> 31.4): i piu critici (meno
+        # spazio libero, coda piu alta...) compaiono per primi invece che in
+        # ordine alfabetico, che per una lista di server non dice nulla su
+        # dove guardare prima. Chi non ha un Value numerico parsabile va in
+        # fondo, ordinato per nome server come prima.
+        $sortedGroup = $g.Group | Sort-Object -Property @(
+            @{Expression = {
+                $parsed = 0.0
+                $ok = $false
+                if ($_.Value -match '^\s*([\d.,]+)') {
+                    $ok = [double]::TryParse(($matches[1] -replace ',', '.'), [ref]$parsed)
+                }
+                if ($ok) { $parsed } else { [double]::MaxValue }
+            }},
+            @{Expression = 'Server'}
+        )
+
+        $servers = ($sortedGroup | ForEach-Object {
             if ($_.Value) { '{0} ({1})' -f $_.Server, $_.Value } else { [string]$_.Server }
         }) -join ', '
         [pscustomobject]@{
             Severity     = $first.Severity
             Category     = $first.Category
             Item         = $first.Item
-            Message      = $first.Message
+            Message      = $message
             Servers      = $servers
             ServerCount  = $g.Group.Count
         }
@@ -2704,7 +2732,11 @@ function New-HcFindingTable {
     param([string]$Title, [object[]]$Rows, [string]$Accent = '#34495e')
 
     if (-not $Rows -or $Rows.Count -eq 0) { return '' }
-    $merged = Get-HcMergedFindingRows -Rows $Rows
+    # @() forza l'array anche lato chiamante: una funzione che restituisce un
+    # solo oggetto (un solo evento distinto dopo il raggruppamento, comune)
+    # altrimenti si "srotola" in uno scalare qui, e $merged.Count sotto
+    # risulterebbe vuoto invece di 1 nel titolo della tabella.
+    $merged = @(Get-HcMergedFindingRows -Rows $Rows)
 
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:$Accent;margin:22px 0 6px 0;'>$(ConvertTo-HcHtmlText $Title) ($($merged.Count))</h3>")
@@ -3084,10 +3116,15 @@ function New-HcMailBody {
     # database, niente RAID sui volumi dati) un disco che degrada colpisce un
     # solo database, restando invisibile finche' non si guarda qui invece che
     # nei sintomi del database stesso.
+    # In mail si mostrano solo i dischi non sani, e la sezione intera sparisce
+    # se sono tutti Healthy: a differenza della console (dove la fotografia
+    # completa serve anche per confermare "va tutto bene" durante un giro a
+    # mano), qui su un parco di decine di dischi elencarli tutti ogni volta
+    # e' solo rumore - quello che conta in una mail e' cosa non va.
     $diskSummary = @($PhysicalDiskSummary)
-    if ($diskSummary.Count -gt 0 -and $script:Config.Mail.IncludePhysicalDiskSummary) {
-        $diskNotHealthy = @($diskSummary | Where-Object { $_.Severity -ne 'OK' })
-        [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:22px 0 6px 0;'>Dischi fisici - $($diskSummary.Count) totali, $($diskNotHealthy.Count) non sani</h3>")
+    $diskNotHealthy = @($diskSummary | Where-Object { $_.Severity -ne 'OK' })
+    if ($diskNotHealthy.Count -gt 0 -and $script:Config.Mail.IncludePhysicalDiskSummary) {
+        [void]$sb.AppendLine("<h3 style='font-family:Segoe UI,Arial,sans-serif;font-size:15px;color:#34495e;margin:22px 0 6px 0;'>Dischi fisici non sani - $($diskNotHealthy.Count) su $($diskSummary.Count) totali</h3>")
         [void]$sb.AppendLine("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;font-family:Segoe UI,Arial,sans-serif;font-size:12px;'>")
         [void]$sb.AppendLine("<tr style='background:#f4f6f7;text-align:left;'>" +
             "<th style='border:1px solid #dfe4e6;'>Server</th>" +
@@ -3098,7 +3135,7 @@ function New-HcMailBody {
             "<th style='border:1px solid #dfe4e6;'>Stato</th>" +
             "<th style='border:1px solid #dfe4e6;'>Operativo</th></tr>")
 
-        foreach ($row in ($diskSummary | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Server, DeviceId)) {
+        foreach ($row in ($diskNotHealthy | Sort-Object @{Expression = { Get-SeverityRank $_.Severity }; Descending = $true}, Server, DeviceId)) {
             $color = Get-HcSeverityColor $row.Severity
             $template = "<tr><td style='border:1px solid #dfe4e6;font-weight:600;border-left:4px solid {0};'>{1}</td>" +
                 "<td style='border:1px solid #dfe4e6;'>{2}</td>" +

@@ -181,7 +181,11 @@ esattamente un database, lasciando sani tutti gli altri: questa vista lo
 rende visibile subito, senza dover indovinare quale sia la causa da un
 sintomo indiretto. In console i dischi non sani vengono mostrati in cima
 (qui l'obiettivo è vedere subito i pochi problemi su un server che può
-avere decine di dischi, non scorrere un inventario fisso).
+avere decine di dischi, non scorrere un inventario fisso). **In mail** la
+sezione mostra solo i dischi non sani, e sparisce del tutto se sono tutti
+Healthy — l'inventario completo (utile per un'ispezione manuale) resta solo
+in console/report, non ha senso ripeterlo ad ogni mail su un parco di
+decine di dischi.
 
 **Due mail distinte.** Oltre alla mail di riepilogo (sempre completa: contatori,
 categorie, server, dettaglio), quando in un giro compare qualcosa di davvero

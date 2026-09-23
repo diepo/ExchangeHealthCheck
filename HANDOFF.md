@@ -902,6 +902,59 @@ Verificato con un test dedicato: 6 finding grezzi (3 stesso health set su 3
 server con messaggio diverso solo nel timestamp, 2 dischi diversi con valori
 diversi, 1 database singolo) collassano correttamente in 3 righe.
 
+**Correzione immediata, stessa sessione**: l'utente ha fatto notare che il
+`Dettaglio` mostrato per il gruppo Disco era fuorviante — il messaggio del
+*primo* server del gruppo (con il suo GB/percentuale specifico) veniva
+mostrato come se valesse per l'intero gruppo, mentre ogni server ha in
+realtà un valore diverso (già corretto nella colonna Server). Corretto così:
+
+- **`Dettaglio` generico quando i messaggi del gruppo NON sono tutti
+  identici** (`$g.Group.Message | Select-Object -Unique`, tipico di Disco/
+  PhysicalDisk/Queue dove il messaggio incorpora un valore per server):
+  sostituito con "Vedi il valore specifico per ciascun server nella colonna
+  Server." Per Managed Availability/Database/Certificate, dove il messaggio è
+  già identico su tutti i server del gruppo, resta rappresentativo come
+  prima.
+- **Server ordinati per criticità**, non alfabeticamente: quando `Value`
+  inizia con un numero parsabile (es. `"31.4 GB / 13.4%"` → `31.4`, gestisce
+  anche la virgola decimale italiana), i server vengono ordinati per quel
+  valore crescente — i più critici (meno spazio libero) compaiono per primi
+  nella lista. Chi non ha un `Value` numerico (Managed Availability, ecc.) va
+  in fondo, ordinato per nome come prima.
+
+**Bug scoperto durante l'implementazione, non correlato al punto sopra**: un
+classico "quirk" di PowerShell — una funzione che restituisce un solo oggetto
+tramite `return @(...)` non garantisce che il *chiamante* lo riceva come
+array: se non catturato anch'esso con `@()`, un risultato a un solo elemento
+si "srotola" in uno scalare. `$merged = Get-HcMergedFindingRows ...` in
+`New-HcFindingTable` ne era vittima: con un solo evento distinto (comune —
+una singola anomalia), `$merged.Count` risultava vuoto invece di `1`, quindi
+il titolo della tabella mostrava "Nuove anomalie ()" invece di "Nuove
+anomalie (1)". Corretto forzando `$merged = @(Get-HcMergedFindingRows ...)`
+lato chiamante. Il ciclo `foreach` sulle righe non era affetto (funziona
+anche su uno scalare), solo il conteggio nel titolo.
+
+### 3.25 Mail: dischi fisici mostrati solo se non sani
+
+Su richiesta esplicita dell'utente (2026-09-23): la sezione "Dischi fisici"
+della mail mostrava sempre **tutti** i dischi, sani compresi (coerente con la
+filosofia dei *finding*, dove la fotografia completa ha valore anche per
+confermare che va tutto bene — vedi §3.17). In una mail su un parco di
+decine/centinaia di dischi, però, è puro rumore: quello che conta è cosa non
+va. Cambiato **solo per la mail** (la vista console, pensata per un'ispezione
+manuale più completa, resta invariata — mostra sempre tutti i dischi):
+
+- La tabella elenca ora **solo** i dischi con `Severity -ne 'OK'`.
+- Se **tutti** i dischi sono sani, l'intera sezione (titolo + tabella) non
+  compare affatto nella mail, invece di mostrare una tabella con zero righe
+  sopra un titolo "0 non sani".
+- Il titolo riporta comunque il totale per contesto: "Dischi fisici non sani
+  - N su M totali".
+
+Verificato con un test dedicato: tutti dischi Healthy → nessuna sezione;
+un disco Unhealthy su tre → sezione presente, titolo "1 su 3 totali", solo
+la riga del disco non sano nella tabella (quelli sani non compaiono).
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
