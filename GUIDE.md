@@ -401,8 +401,9 @@ mostrati come Low Issue invece di Warning/Critical (configurabile in
 GB assoluti è ancora tanto, tipico dei volumi molto grandi — genera un Low
 Issue invece di restare invisibile. Un Low Issue **non genera mai una mail
 di alert** (resta sotto la soglia minima di notifica di default), ma è
-sempre visibile nel report/console e nella sezione "Stato per categoria"
-della mail — è un "tienilo d'occhio", non un "non fare nulla".
+sempre visibile nel report/console, nella sezione "Stato per categoria" e in
+una tabella dedicata "Anomalie a basso impatto (Low Issue)" della mail — è un
+"tienilo d'occhio", non un "non fare nulla".
 
 Attenzione: siccome `Certificate` è declassata **per intero**, anche un
 certificato già scaduto oggi genera solo un Low Issue, non un alert via

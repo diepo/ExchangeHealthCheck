@@ -834,12 +834,23 @@ confronto era un numero fisso `-lt 2` prima di questo cambio; reso relativo a
 `Get-SeverityRank 'Warning'` per non rompersi silenziosamente se la scala dei
 rank cambia di nuovo in futuro).
 
+**Tabella dedicata in mail** (v1.19.0, richiesta esplicita dell'utente subito
+dopo il rilascio): le LowIssue non passano mai da `Resolve-HcAlert` (restano
+sempre sotto la soglia minima), quindi non comparivano in nessuna delle
+tabelle esistenti ("Nuove anomalie"/"Anomalie peggiorate"/"Anomalie ancora
+aperte", tutte popolate da `$AlertResult`) — solo nei conteggi aggregati di
+"Stato per categoria". Aggiunta una quinta tabella, "Anomalie a basso impatto
+(Low Issue)", popolata direttamente da `$AllFindings` (non da `$AlertResult`,
+proprio perché le LowIssue non ci finiscono mai), posizionata dopo "Anomalie
+ancora aperte" e prima di "Rientrate".
+
 Verificato con un test dedicato sotto Windows PowerShell 5.1 reale: ordine
 dei rank, declassamento per le 4 chiavi di default (e non-declassamento per
 categorie/item simili ma non in lista), il caso disco enorme (5%/500GB →
 LowIssue), il caso disco già Critical che non regredisce, `Get-HcCategorySummary`
-con `LowIssue` come unica anomalia, e `Resolve-HcAlert` che conferma zero
-notifiche per un `LowIssue` con la soglia di default.
+con `LowIssue` come unica anomalia, `Resolve-HcAlert` che conferma zero
+notifiche per un `LowIssue` con la soglia di default, e `New-HcMailBody` che
+genera correttamente la tabella dedicata con la riga attesa.
 
 ## 4. Schema di configurazione (riferimento completo)
 

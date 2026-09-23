@@ -1,4 +1,4 @@
-# Versione script: 1.18.1 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.19.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.18.1 (2026-09-23)
+    Versione script: 1.19.0 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.18.1'
+$script:ScriptVersion  = '1.19.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -2897,6 +2897,11 @@ function New-HcMailBody {
     [void]$sb.AppendLine((New-HcFindingTable -Title 'Nuove anomalie' -Rows @($AlertResult.New) -Accent '#c0392b'))
     [void]$sb.AppendLine((New-HcFindingTable -Title 'Anomalie peggiorate' -Rows @($AlertResult.Escalated) -Accent '#c0392b'))
     [void]$sb.AppendLine((New-HcFindingTable -Title 'Anomalie ancora aperte' -Rows @($AlertResult.Reminders) -Accent '#e67e22'))
+
+    # Le LowIssue non passano mai da Resolve-HcAlert (restano sempre sotto la
+    # soglia minima di notifica, §3.23): per essere viste bisogna leggerle
+    # direttamente da AllFindings, non da AlertResult come le tabelle sopra.
+    [void]$sb.AppendLine((New-HcFindingTable -Title 'Anomalie a basso impatto (Low Issue)' -Rows @($AllFindings | Where-Object { $_.Severity -eq 'LowIssue' }) -Accent '#b7950b'))
 
     $recovered = @($AlertResult.Recovered)
     if ($recovered.Count -gt 0) {
