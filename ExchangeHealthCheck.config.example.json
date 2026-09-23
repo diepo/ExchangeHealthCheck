@@ -39,6 +39,7 @@
     "DiskFreePercentCritical": 6,
     "DiskFreeGBWarning": 60,
     "DiskFreeGBCritical": 15,
+    "DiskFreePercentLowIssue": 7,
     "MinimumVolumeSizeGB": 5,
 
     "MemoryFreePercentWarning": 6,
@@ -137,6 +138,12 @@
   },
 
   "ExtraServices": ["W3SVC", "WinRM"],
+  "LowIssueKeys": [
+    "ManagedAvailability|*|ActiveSync*",
+    "ManagedAvailability|*|OWA.Calendar.Proxy*",
+    "ManagedAvailability|*|Imap*",
+    "Certificate|*|*"
+  ],
 
   "Alerting": {
     "CooldownMinutes": 120,

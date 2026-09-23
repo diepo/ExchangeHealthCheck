@@ -392,6 +392,23 @@ comportamento è specifico solo per le code di replica del DAG. Per un test
 immediato senza aspettare 2 ore, `-ForceMail`/`-TestMail` bypassano sempre
 l'attesa.
 
+**Vedo una nuova severità "Low Issue" (colore ambra) — cos'è?**
+È un livello sotto Warning, pensato per anomalie note come poco urgenti in
+questo ambiente: gli health set `ActiveSync`, `OWA.Calendar.Proxy` e `Imap`
+(Managed Availability) e l'intera categoria `Certificate` vengono sempre
+mostrati come Low Issue invece di Warning/Critical (configurabile in
+`LowIssueKeys`), e un disco con meno del 7% di spazio libero — anche se in
+GB assoluti è ancora tanto, tipico dei volumi molto grandi — genera un Low
+Issue invece di restare invisibile. Un Low Issue **non genera mai una mail
+di alert** (resta sotto la soglia minima di notifica di default), ma è
+sempre visibile nel report/console e nella sezione "Stato per categoria"
+della mail — è un "tienilo d'occhio", non un "non fare nulla".
+
+Attenzione: siccome `Certificate` è declassata **per intero**, anche un
+certificato già scaduto oggi genera solo un Low Issue, non un alert via
+mail — se preferisci un comportamento diverso per quel caso specifico,
+richiedi una modifica a `LowIssueKeys`.
+
 ## 8. Sicurezza e privacy dei dati
 
 - Lo script non modifica nulla in Exchange: solo cmdlet `Get-*` e `Test-*`.

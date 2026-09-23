@@ -1,4 +1,4 @@
-# Versione script: 1.17.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
+# Versione script: 1.18.0 (2026-09-23) - vedi VERSION e .NOTES piu sotto.
 #Requires -Version 5.1
 <#
 .SYNOPSIS
@@ -58,7 +58,7 @@
     Account richiesto: View-Only Organization Management + amministratore locale
     sui server (necessario per WinRM/CIM remoto).
 
-    Versione script: 1.17.0 (2026-09-23)
+    Versione script: 1.18.0 (2026-09-23)
     Ultimo aggiornamento: rimosso il check/alert sul backup (soglie
     BackupAgeHoursWarning/Critical) su richiesta dell'utente - vedi
     HANDOFF.md §3.18. La versione compare anche come prima riga di log di
@@ -80,7 +80,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-$script:ScriptVersion  = '1.17.0'
+$script:ScriptVersion  = '1.18.0'
 $script:StartTime      = Get-Date
 $script:ScriptRoot     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $script:Findings       = New-Object System.Collections.Generic.List[object]
@@ -135,6 +135,7 @@ $DefaultConfigJson = @'
     "DiskFreePercentCritical": 6,
     "DiskFreeGBWarning": 60,
     "DiskFreeGBCritical": 15,
+    "DiskFreePercentLowIssue": 7,
     "MinimumVolumeSizeGB": 5,
     "MemoryFreePercentWarning": 6,
     "MemoryFreePercentCritical": 3,
@@ -186,6 +187,12 @@ $DefaultConfigJson = @'
     "Keys": []
   },
   "ExtraServices": ["W3SVC", "WinRM"],
+  "LowIssueKeys": [
+    "ManagedAvailability|*|ActiveSync*",
+    "ManagedAvailability|*|OWA.Calendar.Proxy*",
+    "ManagedAvailability|*|Imap*",
+    "Certificate|*|*"
+  ],
   "Alerting": {
     "CooldownMinutes": 120,
     "SendRecovery": true,
@@ -311,9 +318,10 @@ function Remove-HcOldFiles {
 function Get-SeverityRank {
     param([string]$Severity)
     switch ($Severity) {
-        'Critical' { 4 }
-        'Unknown'  { 3 }
-        'Warning'  { 2 }
+        'Critical' { 5 }
+        'Unknown'  { 4 }
+        'Warning'  { 3 }
+        'LowIssue' { 2 }
         'Info'     { 1 }
         default    { 0 }
     }
@@ -321,12 +329,16 @@ function Get-SeverityRank {
 
 # Colore console per severita, condiviso tra i finding e il riepilogo code: cosi
 # i due output restano visivamente coerenti (rosso = Critical, verde = OK, ...).
+# LowIssue: anomalie di basso impatto (es. health set noti per essere rumorosi
+# in questo ambiente, un disco enorme sotto il 7% ma con GB ancora abbondanti) -
+# visibili nei riepiloghi ma sotto la soglia di notifica di default (§3.23).
 function Get-HcConsoleColor {
     param([string]$Severity)
     switch ($Severity) {
         'Critical' { 'Red' }
         'Unknown'  { 'Magenta' }
         'Warning'  { 'Yellow' }
+        'LowIssue' { 'DarkYellow' }
         'Info'     { 'Cyan' }
         default    { 'Green' }
     }
@@ -337,7 +349,7 @@ function Add-Finding {
         [Parameter(Mandatory)][string]$Category,
         [string]$Server = '-',
         [string]$Item   = '-',
-        [ValidateSet('OK','Info','Warning','Critical','Unknown')][string]$Severity = 'OK',
+        [ValidateSet('OK','Info','LowIssue','Warning','Critical','Unknown')][string]$Severity = 'OK',
         [string]$Message,
         [object]$Value
     )
@@ -349,6 +361,19 @@ function Add-Finding {
             return
         }
     }
+
+    # "Anomalie basse": alcune categorie/health set sono note, in questo
+    # ambiente, per essere rumorose o poco urgenti (§3.23) - non si escludono
+    # (Ignore.Keys le farebbe sparire del tutto), si declassano. Solo un
+    # Warning/Critical viene abbassato a LowIssue; OK/Info/Unknown restano
+    # come sono (Unknown resta "non so cosa sia successo", non va mai
+    # ammorbidito). Stesso formato pattern di Ignore.Keys (Categoria|Server|Oggetto).
+    if ($Severity -in @('Warning', 'Critical')) {
+        foreach ($pattern in @($script:Config.LowIssueKeys)) {
+            if ($pattern -and $key -like $pattern) { $Severity = 'LowIssue'; break }
+        }
+    }
+
     $finding = [pscustomobject]@{
         # Cast esplicito, non solo "Get-Date": chiamato direttamente dentro un
         # literal @{} o assegnato a una proprieta esistente, Get-Date produce un
@@ -378,7 +403,7 @@ function Add-Finding {
         'Warning'  { 'WARN'  }
         default    { 'INFO'  }
     }
-    $detailOnly = ((Get-SeverityRank $Severity) -lt 2)
+    $detailOnly = ((Get-SeverityRank $Severity) -lt (Get-SeverityRank 'Warning'))
     Write-HcLog ('{0,-8} {1,-22} {2,-18} {3}' -f $Severity.ToUpperInvariant(), $Category, $Server, $Message) `
         -Level $level -Color $color -VerboseOnly:$detailOnly
 }
@@ -1047,6 +1072,7 @@ function Get-HcVolumeThreshold {
         FreePercentCritical = [double]$t.DiskFreePercentCritical
         FreeGBWarning       = [double]$t.DiskFreeGBWarning
         FreeGBCritical      = [double]$t.DiskFreeGBCritical
+        FreePercentLowIssue = [double]$t.DiskFreePercentLowIssue
         Mode                = [string]$t.DiskMode
     }
 
@@ -1059,6 +1085,7 @@ function Get-HcVolumeThreshold {
             if ($null -ne $ovr.FreePercentCritical) { $result.FreePercentCritical = [double]$ovr.FreePercentCritical }
             if ($null -ne $ovr.FreeGBWarning)       { $result.FreeGBWarning       = [double]$ovr.FreeGBWarning }
             if ($null -ne $ovr.FreeGBCritical)      { $result.FreeGBCritical      = [double]$ovr.FreeGBCritical }
+            if ($null -ne $ovr.FreePercentLowIssue) { $result.FreePercentLowIssue = [double]$ovr.FreePercentLowIssue }
             if ($ovr.Mode)                          { $result.Mode                = [string]$ovr.Mode }
             break
         }
@@ -1098,8 +1125,17 @@ function Invoke-HcDiskCheck {
             $isWarning  = ($pctWarn -and $gbWarn)
         }
 
+        # LowIssue: early-warning basato solo sulla percentuale, a prescindere
+        # dai GB assoluti - pensato per volumi enormi dove la condizione GB di
+        # Warning/Critical (in AND con la percentuale) non scatterebbe mai,
+        # lasciando un calo di spazio reale senza alcun segnale finche' non si
+        # arriva a soglie ben piu basse. Si applica solo se il volume non e'
+        # gia' Warning/Critical per le regole normali (mai un downgrade,
+        # solo un segnale aggiuntivo per casi altrimenti invisibili).
         $sev = 'OK'
-        if ($isCritical) { $sev = 'Critical' } elseif ($isWarning) { $sev = 'Warning' }
+        if ($isCritical) { $sev = 'Critical' }
+        elseif ($isWarning) { $sev = 'Warning' }
+        elseif (([double]$vol.FreePercent) -lt $th.FreePercentLowIssue) { $sev = 'LowIssue' }
 
         $label = if ($vol.Label) { ' [' + $vol.Label + ']' } else { '' }
         Add-Finding -Category 'Disk' -Server $Target.Name -Item $volumeId -Severity $sev `
@@ -2480,6 +2516,7 @@ function Get-HcSeverityColor {
         'Critical' { '#c0392b' }
         'Unknown'  { '#8e44ad' }
         'Warning'  { '#e67e22' }
+        'LowIssue' { '#b7950b' }
         'Info'     { '#2980b9' }
         default    { '#27ae60' }
     }
@@ -2517,17 +2554,18 @@ function Get-HcCategorySummary {
     # discorso per Queue (Value e il conteggio reale di quel server).
     $rows = foreach ($group in ($Findings | Group-Object Category)) {
         $counts = @{}
-        foreach ($sev in @('Critical', 'Warning', 'Unknown', 'Info', 'OK')) {
+        foreach ($sev in @('Critical', 'Warning', 'LowIssue', 'Unknown', 'Info', 'OK')) {
             $counts[$sev] = @($group.Group | Where-Object Severity -eq $sev | Group-Object Item, Value).Count
         }
         $topSeverity = 'OK'
-        foreach ($sev in @('Critical', 'Unknown', 'Warning', 'Info')) {
+        foreach ($sev in @('Critical', 'Unknown', 'Warning', 'LowIssue', 'Info')) {
             if ($counts[$sev] -gt 0) { $topSeverity = $sev; break }
         }
         [pscustomobject]@{
             Category    = $group.Name
             Critical    = $counts.Critical
             Warning     = $counts.Warning
+            LowIssue    = $counts.LowIssue
             Unknown     = $counts.Unknown
             Info        = $counts.Info
             OK          = $counts.OK
@@ -2547,12 +2585,12 @@ function Write-HcCategorySummaryConsole {
     if ($rows.Count -eq 0) { return }
 
     Write-Host "`nStato per categoria (l'intero ambiente, non un singolo server)" -ForegroundColor White
-    $header = '{0,-22} {1,9} {2,8} {3,8} {4,6}' -f 'Categoria', 'Critical', 'Warning', 'Unknown', 'Info'
+    $header = '{0,-22} {1,9} {2,8} {3,9} {4,8} {5,6}' -f 'Categoria', 'Critical', 'Warning', 'LowIssue', 'Unknown', 'Info'
     Write-Host $header -ForegroundColor Gray
     Write-Host ('-' * $header.Length) -ForegroundColor Gray
 
     foreach ($row in $rows) {
-        $line = '{0,-22} {1,9} {2,8} {3,8} {4,6}' -f $row.Category, $row.Critical, $row.Warning, $row.Unknown, $row.Info
+        $line = '{0,-22} {1,9} {2,8} {3,9} {4,8} {5,6}' -f $row.Category, $row.Critical, $row.Warning, $row.LowIssue, $row.Unknown, $row.Info
         Write-Host $line -ForegroundColor (Get-HcConsoleColor $row.TopSeverity)
     }
     Write-Host ""
@@ -2571,6 +2609,7 @@ function New-HcCategorySummaryTable {
         "<th style='border:1px solid #dfe4e6;'>Categoria</th>" +
         "<th style='border:1px solid #dfe4e6;text-align:center;'>Critical</th>" +
         "<th style='border:1px solid #dfe4e6;text-align:center;'>Warning</th>" +
+        "<th style='border:1px solid #dfe4e6;text-align:center;'>Low Issue</th>" +
         "<th style='border:1px solid #dfe4e6;text-align:center;'>Unknown</th>" +
         "<th style='border:1px solid #dfe4e6;text-align:center;'>Info</th></tr>")
 
@@ -2580,8 +2619,9 @@ function New-HcCategorySummaryTable {
             "<td style='border:1px solid #dfe4e6;text-align:center;'>{2}</td>" +
             "<td style='border:1px solid #dfe4e6;text-align:center;'>{3}</td>" +
             "<td style='border:1px solid #dfe4e6;text-align:center;'>{4}</td>" +
-            "<td style='border:1px solid #dfe4e6;text-align:center;'>{5}</td></tr>"
-        $html = $template -f $color, (ConvertTo-HcHtmlText $row.Category), $row.Critical, $row.Warning, $row.Unknown, $row.Info
+            "<td style='border:1px solid #dfe4e6;text-align:center;'>{5}</td>" +
+            "<td style='border:1px solid #dfe4e6;text-align:center;'>{6}</td></tr>"
+        $html = $template -f $color, (ConvertTo-HcHtmlText $row.Category), $row.Critical, $row.Warning, $row.LowIssue, $row.Unknown, $row.Info
         [void]$sb.AppendLine($html)
     }
     [void]$sb.AppendLine('</table>')
@@ -2821,6 +2861,7 @@ function New-HcMailBody {
     $counts    = @{
         Critical = @($AllFindings | Where-Object { $_.Severity -eq 'Critical' }).Count
         Warning  = @($AllFindings | Where-Object { $_.Severity -eq 'Warning' }).Count
+        LowIssue = @($AllFindings | Where-Object { $_.Severity -eq 'LowIssue' }).Count
         Unknown  = @($AllFindings | Where-Object { $_.Severity -eq 'Unknown' }).Count
         Info     = @($AllFindings | Where-Object { $_.Severity -eq 'Info' }).Count
         Ok       = @($AllFindings | Where-Object { $_.Severity -eq 'OK' }).Count
@@ -2842,7 +2883,7 @@ function New-HcMailBody {
 
     [void]$sb.AppendLine("<table cellpadding='8' cellspacing='0' style='margin-top:14px;border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:13px;'>")
     [void]$sb.AppendLine("<tr>")
-    foreach ($sev in @('Critical','Unknown','Warning','Info','Ok')) {
+    foreach ($sev in @('Critical','Unknown','Warning','LowIssue','Info','Ok')) {
         $color = Get-HcSeverityColor $sev
         [void]$sb.AppendLine("<td style='border:1px solid #dfe4e6;text-align:center;min-width:92px;'><div style='color:$color;font-size:22px;font-weight:700;'>$($counts[$sev])</div><div style='color:#7f8c8d;font-size:11px;text-transform:uppercase;'>$sev</div></td>")
     }

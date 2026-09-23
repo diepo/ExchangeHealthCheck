@@ -757,6 +757,82 @@ Critical. L'incidente reale di DAG5-DB19 (§3.15, §5 riga 19) aveva
 `ReplayQueueLength` a 8576/9609: la nuova soglia Critical (5000) lo avrebbe
 comunque intercettato, restando sotto quel valore.
 
+### 3.23 Nuova severità `LowIssue` ("anomalie basse")
+
+Su richiesta esplicita dell'utente (2026-09-23): alcune categorie sono note,
+in questo ambiente, per essere rumorose o poco urgenti (`ActiveSync`,
+`OWA.Calendar.Proxy` e `Imap` come health set Managed Availability, tutta la
+categoria `Certificate`), e un early-warning basato solo sulla percentuale
+libera di un disco (indipendente dai GB assoluti) è utile ma non deve avere
+lo stesso peso di un vero Warning/Critical. Aggiunta una quinta severità,
+`LowIssue`, tra `Info` e `Warning` nell'ordinamento
+(`OK` < `Info` < `LowIssue` < `Warning` < `Unknown` < `Critical` —
+`Get-SeverityRank` rinumerata di conseguenza, 0-5).
+
+**Perché sotto `Warning` e non un ignore**: `Ignore.Keys`/`Ignore.HealthSets`
+fanno *sparire* il finding. Qui invece si vuole il contrario — restare
+visibile in console/report/mail (categoria "Stato per categoria"), ma senza
+contribuire a `$active`/`$toNotify` in `Resolve-HcAlert`: dato che
+`Alerting.MinimumSeverityToMail` di default è `Warning` (rank 3) e `LowIssue`
+ha rank 2, un `LowIssue` non genera mai una notifica via il meccanismo di
+soglia già esistente, senza bisogno di logica nuova nella macchina a stati.
+
+**Due meccanismi di declassamento distinti, non uno solo**:
+
+1. **`LowIssueKeys`** (nuova lista top-level di configurazione, stesso
+   formato pattern `Categoria|Server|Oggetto` di `Ignore.Keys`, con wildcard):
+   applicato dentro `Add-Finding` stessa, appena dopo il filtro
+   `Ignore.Keys` — se il finding ha severità `Warning` o `Critical` (mai
+   `Unknown`: "non so cosa sia successo" non va mai ammorbidito) e la sua
+   chiave combacia con un pattern, la severità diventa `LowIssue` prima
+   ancora di essere salvata. Default:
+   `ManagedAvailability|*|ActiveSync*`, `ManagedAvailability|*|OWA.Calendar.Proxy*`,
+   `ManagedAvailability|*|Imap*`, `Certificate|*|*`.
+
+   **Rischio esplicito, accettato su richiesta diretta dell'utente**: la
+   voce `Certificate|*|*` declassa **qualunque** finding di quella categoria,
+   incluso un certificato **già scaduto** (severità originaria Critical) —
+   non solo il caso "in scadenza tra N giorni" che ne era probabilmente la
+   motivazione originale. Chi eredita questo progetto deve sapere che, con la
+   configurazione di default, un certificato scaduto su un connector SMTP non
+   genera più un alert via mail, solo una riga `LowIssue` nel riepilogo. Se in
+   futuro emerge che serve distinguere i due casi, la soluzione è restringere
+   il pattern con condizioni più specifiche (es. via `Value`/`Message`), non
+   rimuovere la voce di netto senza discuterne prima con l'utente.
+
+2. **Disco, regola indipendente in `Invoke-HcDiskCheck`**: `DiskFreePercentLowIssue`
+   (default 7) — se il volume **non** è già Warning/Critical per le regole
+   normali (AND tra percentuale e GB, §3.20bis), ma `FreePercent` scende sotto
+   questa soglia, diventa `LowIssue`. Serve per i volumi enormi dove la
+   condizione GB non scatterebbe mai (es. 5% di un volume da 10 TB sono
+   comunque 500 GB liberi, quindi mai sotto `DiskFreeGBWarning`/`Critical`):
+   senza questa regola un calo di spazio reale in percentuale resterebbe
+   completamente invisibile fino a soglie assai più basse. Non è mai un
+   downgrade (un volume già Critical/Warning non torna mai a LowIssue).
+   Configurabile anche per pattern di volume/server via `VolumeOverrides`
+   (stesso meccanismo delle altre soglie disco).
+
+**Colori**: console `DarkYellow` (distinto da `Yellow` di Warning), mail
+`#b7950b` (oro/ambra scuro, tra il blu di Info e l'arancione di Warning).
+Aggiunta a tutte le viste aggregate: `Get-HcCategorySummary` (conteggio e
+`TopSeverity`), tabella "Stato per categoria" (console e mail), banner
+conteggi della mail. Il banner/headline della mail (verde/arancione/rosso
+in cima) **non** considera `LowIssue` nella sua decisione — un giro con solo
+`LowIssue` resta "Ambiente in salute", coerente con l'obiettivo di non
+allarmare per queste anomalie.
+
+**Visibilità in console**: come `Info`, mostrato solo con `-Verbose` (il
+confronto era un numero fisso `-lt 2` prima di questo cambio; reso relativo a
+`Get-SeverityRank 'Warning'` per non rompersi silenziosamente se la scala dei
+rank cambia di nuovo in futuro).
+
+Verificato con un test dedicato sotto Windows PowerShell 5.1 reale: ordine
+dei rank, declassamento per le 4 chiavi di default (e non-declassamento per
+categorie/item simili ma non in lista), il caso disco enorme (5%/500GB →
+LowIssue), il caso disco già Critical che non regredisce, `Get-HcCategorySummary`
+con `LowIssue` come unica anomalia, e `Resolve-HcAlert` che conferma zero
+notifiche per un `LowIssue` con la soglia di default.
+
 ## 4. Schema di configurazione (riferimento completo)
 
 Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
@@ -766,13 +842,14 @@ Vedi `ExchangeHealthCheck.config.example.json` per i valori concreti. Sezioni:
 | `Organization` | Nome, server a cui connettersi (`ConnectTo`, usato solo se non si è già in Exchange Management Shell), `ViewEntireForest`, rilevamento/override del domain controller |
 | `Servers` | Perimetro (`Include`/`Exclude`/`SiteFilter`/`IncludeEdge`), `UseFqdnForRemoting`, `SkipExchangeChecksWhenOffline` |
 | `Checks` | Un booleano per famiglia di controllo (Os, Disk, PhysicalDisk (§3.17), Services, Components, Health, Dag, Replication, Databases, Queues, BackPressure, Certificates, Mapi) |
-| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or), memoria, CPU, code (`QueueWarning`/`QueueCritical` per singola coda, `QueueTotalWarning`/`QueueTotalCritical` per il totale-server, §3.14), copy/replay queue del DAG, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
+| `Thresholds` | Tutte le soglie numeriche: disco (con `DiskMode` And/Or, `DiskFreePercentLowIssue` per l'early-warning solo percentuale, §3.23), memoria, CPU, code (`QueueWarning`/`QueueCritical` per singola coda, `QueueTotalWarning`/`QueueTotalCritical` per il totale-server, §3.14), copy/replay queue del DAG, scadenza certificati, timeout di rete, `QueueSubjectThreshold` (soglia condivisa tra il tag "ATTENZIONE CODE" in oggetto e l'innesco della mail dedicata alle novità), `CertificateCheckTimeoutSeconds`/`ManagedAvailabilityTimeoutSeconds` (timeout duro via job separato, §3.11) |
 | `VolumeOverrides` | Soglie disco per pattern di server/volume, con precedenza sul primo match |
 | `HealthReport` | `IncludeFailingMonitors` (arricchisce l'alert con i monitor Managed Availability in errore), `MaxMonitorsPerHealthSet`, `MonitorDetailTimeoutSeconds` (§3.11) |
 | `Queues` | `ResolveNextHopHostnames`, `ReverseDnsTimeoutMs`, `TryNetBiosFallback`, `NetBiosTimeoutMs`, `ResolveSendConnectorName` |
 | `Console` | `ShowCategorySummary`, `ShowClusterSummary`, `ShowDatabaseSummary` (per server), `ShowDatabasePerDbSummary` (per database, §3.15), `ShowPhysicalDiskSummary` (§3.17), `ShowQueueSummary` |
 | `Ignore` | Liste di esclusione: Services, ServerComponents, HealthSets (statico, per nome), HealthSetsWithoutDatabaseCopy (dinamico, solo su server senza copie — §3.20), Volumes, Databases, Keys (pattern esatto `Categoria\|Server\|Oggetto`, con wildcard) |
 | `ExtraServices` | Servizi non-Exchange da includere nel check Services (default W3SVC, WinRM — RemoteRegistry rimosso, §3.19) |
+| `LowIssueKeys` | Pattern `Categoria\|Server\|Oggetto` (con wildcard) che declassano un finding Warning/Critical a `LowIssue` invece di escluderlo (§3.23) |
 | `Alerting` | Cooldown, heartbeat, notifica di rientro, severità minima da notificare, `SustainedDurationMinutes`/`SustainedCategories` (alert "sostenuto" per Replay/Copy queue, §3.21) |
 | `Mail` | SMTP, autenticazione, mittente/destinatari, allegato CSV, vista code, `QueueAlertSubjectTag`, `SeparateAlertSubjectTag` (vedi §3.10), `IncludeClusterSummary`, `IncludeDatabaseSummary` (§3.12), `IncludeDatabasePerDbSummary` (§3.15), `IncludePhysicalDiskSummary` (§3.17) |
 | `Paths` | Cartelle di log/report/stato, retention |
